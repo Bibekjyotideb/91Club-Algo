@@ -104,18 +104,66 @@ def safe_default_content(driver):
     except WebDriverException:
         pass
 
+# Track whether game is inside an iframe or directly in the page
+_game_in_iframe = None  # None = unknown, True = iframe, False = direct
+
 
 def enter_iframe(driver, timeout=5):
-    """Enter the game iframe. Returns True on success."""
+    """
+    Enter the game context. Works in two modes:
+    1. Game is inside an iframe (91clu.org wrapper) → switch to iframe
+    2. Game is directly in the page (surat91.com) → stay in main page
+
+    Returns True if game elements are accessible.
+    """
+    global _game_in_iframe
+
     safe_default_content(driver)
+
+    # If we already know the game is direct (no iframe), just verify
+    if _game_in_iframe is False:
+        try:
+            driver.find_element(By.CSS_SELECTOR, SEL["recent_balls"])
+            return True
+        except (NoSuchElementException, WebDriverException):
+            # Maybe page changed, re-detect
+            _game_in_iframe = None
+
+    # Try iframe first
     try:
-        iframe = WebDriverWait(driver, timeout).until(
+        iframe = WebDriverWait(driver, min(timeout, 2)).until(
             EC.presence_of_element_located((By.TAG_NAME, "iframe"))
         )
         driver.switch_to.frame(iframe)
-        return True
+        # Verify game elements exist inside iframe
+        try:
+            driver.find_element(By.CSS_SELECTOR, SEL["recent_balls"])
+            _game_in_iframe = True
+            return True
+        except NoSuchElementException:
+            # Iframe exists but doesn't have game — go back
+            safe_default_content(driver)
     except (TimeoutException, WebDriverException):
-        return False
+        pass
+
+    # No iframe or iframe didn't have game — check main page directly
+    safe_default_content(driver)
+    try:
+        driver.find_element(By.CSS_SELECTOR, SEL["recent_balls"])
+        _game_in_iframe = False
+        return True
+    except (NoSuchElementException, WebDriverException):
+        pass
+
+    # Also try finding game name as fallback
+    try:
+        driver.find_element(By.CSS_SELECTOR, SEL["game_name"])
+        _game_in_iframe = False
+        return True
+    except (NoSuchElementException, WebDriverException):
+        pass
+
+    return False
 
 
 # ═══════════════════════════════════════════
@@ -471,7 +519,7 @@ def monitor_single(driver, timer_key):
     timer_name = TIMER_NAMES.get(timer_key, timer_key)
 
     if not enter_iframe(driver):
-        print("  ERROR: No game iframe found!")
+        print("  ERROR: Game not found! Make sure you're on Win Go.")
         return
 
     click_tab(driver, timer_key)
@@ -566,7 +614,7 @@ def monitor_all(driver, timers):
     print("=" * 55)
 
     if not enter_iframe(driver):
-        print("  ERROR: No game iframe!")
+        print("  ERROR: Game not found!")
         return
 
     # Build poll order: 30sec appears twice if present
@@ -729,23 +777,30 @@ def main():
         # Auto-login
         auto_login(driver, PHONE_NUMBER, PASSWORD, args.wait)
 
-        # Verify game iframe
+        # Verify game is accessible (iframe or direct)
         if not enter_iframe(driver):
-            print("  ⚠ No iframe found. Retrying in 5s...")
+            print("  ⚠ Game not found yet. Retrying in 5s...")
             time.sleep(5)
             if not enter_iframe(driver):
-                print("  Still no iframe. Waiting 30 more seconds...")
-                time.sleep(30)
-                if not enter_iframe(driver):
-                    print("  Failed to find game. Exiting.")
+                print("  Still not found. Waiting 30 more seconds...")
+                for _ in range(6):
+                    time.sleep(5)
+                    if enter_iframe(driver):
+                        break
+                else:
+                    print("  Failed to find Win Go game. Make sure you're on the Win Go page.")
+                    print("  Exiting.")
                     return
 
+        mode = "iframe" if _game_in_iframe else "direct page"
         balls = get_balls(driver)
         game = get_active_game(driver)
+        print(f"  ✓ Game found! Mode: {mode}")
         print(f"  Detected: {game}")
         print(f"  Balls: {balls}")
 
-        safe_default_content(driver)
+        if _game_in_iframe:
+            safe_default_content(driver)
 
         if args.timer == "all":
             enter_iframe(driver)
