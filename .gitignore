@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Environment / Credentials (NEVER commit)
+.env
+
+# Database (local data)
+data/predictions.db
+data/*.db-journal
+data/scraper_ready.flag
+data/page_dump.html
+
+# Model checkpoints (large binary files)
+model/checkpoints/*.pt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Gemini/AI
+.gemini/

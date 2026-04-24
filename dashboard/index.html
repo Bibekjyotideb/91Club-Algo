@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Win Go Predictor — Small/Big</title>
+    <meta name="description" content="Real-time Win Go prediction system with LSTM ensemble model">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-left">
+            <div class="logo-icon">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                </svg>
+            </div>
+            <div>
+                <h1>Win Go Predictor</h1>
+                <span class="header-subtitle">LSTM Ensemble • Real-Time Analysis</span>
+            </div>
+        </div>
+        <div class="timer-selector" id="timerSelector">
+            <button class="timer-tab" data-timer="30sec" id="tab-30sec">
+                <span class="timer-label">30s</span>
+                <span class="timer-count" id="count-30sec">0</span>
+            </button>
+            <button class="timer-tab" data-timer="1min" id="tab-1min">
+                <span class="timer-label">1m</span>
+                <span class="timer-count" id="count-1min">0</span>
+            </button>
+            <button class="timer-tab active" data-timer="3min" id="tab-3min">
+                <span class="timer-label">3m</span>
+                <span class="timer-count" id="count-3min">0</span>
+            </button>
+        </div>
+        <div class="header-right">
+            <div class="connection-status" id="connectionStatus">
+                <span class="status-dot"></span>
+                <span class="status-text">Connecting...</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="main-grid">
+        <!-- ============ TOP ROW: PREDICTION + STATS ============ -->
+        <section class="prediction-card" id="predictionCard">
+            <div class="card-header">
+                <h2>Next Prediction</h2>
+                <span class="badge" id="modelBadge">Ensemble</span>
+            </div>
+            <div class="prediction-display">
+                <div class="prediction-label" id="predictionLabel">—</div>
+                <div class="confidence-ring" id="confidenceRing">
+                    <svg viewBox="0 0 120 120">
+                        <circle class="ring-bg" cx="60" cy="60" r="52" />
+                        <circle class="ring-fill" id="ringFill" cx="60" cy="60" r="52" />
+                    </svg>
+                    <div class="confidence-text">
+                        <span class="conf-value" id="confValue">—</span>
+                        <span class="conf-label">confidence</span>
+                    </div>
+                </div>
+            </div>
+            <div class="model-breakdown" id="modelBreakdown">
+                <div class="model-row"><span class="model-name">LSTM</span><div class="model-bar"><div class="model-fill" id="lstmBar"></div></div><span class="model-pct" id="lstmPct">—</span></div>
+                <div class="model-row"><span class="model-name">Markov</span><div class="model-bar"><div class="model-fill markov" id="markovBar"></div></div><span class="model-pct" id="markovPct">—</span></div>
+                <div class="model-row"><span class="model-name">Pattern</span><div class="model-bar"><div class="model-fill pattern" id="patternBar"></div></div><span class="model-pct" id="patternPct">—</span></div>
+                <div class="model-row"><span class="model-name">Frequency</span><div class="model-bar"><div class="model-fill frequency" id="freqBar"></div></div><span class="model-pct" id="freqPct">—</span></div>
+            </div>
+        </section>
+
+        <section class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon accuracy-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                </div>
+                <div class="stat-info">
+                    <span class="stat-value" id="overallAccuracy">0%</span>
+                    <span class="stat-label">Overall Accuracy</span>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon recent-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                </div>
+                <div class="stat-info">
+                    <span class="stat-value" id="recentAccuracy">0%</span>
+                    <span class="stat-label">Last 20 Accuracy</span>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon total-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                </div>
+                <div class="stat-info">
+                    <span class="stat-value" id="totalResults">0</span>
+                    <span class="stat-label">Total Results</span>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon pred-icon">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 00-6 0v4"/><rect x="2" y="9" width="20" height="13" rx="2"/></svg>
+                </div>
+                <div class="stat-info">
+                    <span class="stat-value" id="totalPredictions">0</span>
+                    <span class="stat-label">Predictions Made</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- ============ MIDDLE ROW: RESULTS FEED + CHART ============ -->
+        <section class="results-section">
+            <div class="card-header">
+                <h2>Live Results Feed</h2>
+                <span class="result-count" id="resultCount">0 results</span>
+            </div>
+            <div class="results-feed" id="resultsFeed">
+                <div class="empty-state">
+                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                    <p>No results yet. Add results below or start the scraper.</p>
+                </div>
+            </div>
+        </section>
+
+        <section class="chart-section">
+            <div class="card-header">
+                <h2>Accuracy Over Time</h2>
+            </div>
+            <div class="chart-container">
+                <canvas id="accuracyChart"></canvas>
+            </div>
+        </section>
+
+        <!-- ============ BOTTOM ROW: INPUT + CONTROLS ============ -->
+        <section class="input-section">
+            <div class="card-header">
+                <h2>Quick Input</h2>
+                <span class="input-hint">Tap the result digit</span>
+            </div>
+            <div class="digit-grid" id="digitGrid">
+                <button class="digit-btn small" data-digit="0" id="btn-digit-0">0</button>
+                <button class="digit-btn small" data-digit="1" id="btn-digit-1">1</button>
+                <button class="digit-btn small" data-digit="2" id="btn-digit-2">2</button>
+                <button class="digit-btn small" data-digit="3" id="btn-digit-3">3</button>
+                <button class="digit-btn small" data-digit="4" id="btn-digit-4">4</button>
+                <button class="digit-btn big" data-digit="5" id="btn-digit-5">5</button>
+                <button class="digit-btn big" data-digit="6" id="btn-digit-6">6</button>
+                <button class="digit-btn big" data-digit="7" id="btn-digit-7">7</button>
+                <button class="digit-btn big" data-digit="8" id="btn-digit-8">8</button>
+                <button class="digit-btn big" data-digit="9" id="btn-digit-9">9</button>
+            </div>
+            <div class="bulk-input">
+                <label for="bulkInput">Bulk Input (space-separated digits):</label>
+                <div class="bulk-row">
+                    <input type="text" id="bulkInput" placeholder="e.g. 3 7 2 8 5 1 9 0 4 6" />
+                    <button class="btn-primary" id="bulkSubmit">Submit</button>
+                </div>
+            </div>
+        </section>
+
+        <section class="controls-section">
+            <div class="card-header">
+                <h2>Controls</h2>
+            </div>
+            <div class="controls-grid">
+                <button class="ctrl-btn train" id="btnTrain">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                    Retrain Model
+                </button>
+                <button class="ctrl-btn predict" id="btnPredict">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+                    Get Prediction
+                </button>
+                <button class="ctrl-btn reset" id="btnReset">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg>
+                    Reset Model
+                </button>
+                <button class="ctrl-btn auto-toggle active" id="btnAutoPredict">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                    Auto-Predict: ON
+                </button>
+            </div>
+            <div class="training-status" id="trainingStatus" style="display:none;">
+                <div class="spinner"></div>
+                <span>Training in progress...</span>
+            </div>
+            <div class="log-box" id="logBox">
+                <div class="log-entry">System ready. Add results to begin.</div>
+            </div>
+        </section>
+
+        <!-- ============ PREDICTION HISTORY ============ -->
+        <section class="history-section">
+            <div class="card-header">
+                <h2>Prediction History</h2>
+            </div>
+            <div class="history-table-wrap">
+                <table class="history-table" id="historyTable">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Predicted</th>
+                            <th>Confidence</th>
+                            <th>Actual</th>
+                            <th>Result</th>
+                        </tr>
+                    </thead>
+                    <tbody id="historyBody">
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

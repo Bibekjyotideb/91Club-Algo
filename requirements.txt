@@ -1,0 +1,13 @@
+torch
+numpy
+pandas
+fastapi
+uvicorn[standard]
+websockets
+aiosqlite
+python-dotenv
+selenium
+undetected-chromedriver
+webdriver-manager
+jinja2
+aiofiles
