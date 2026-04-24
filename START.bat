@@ -57,7 +57,7 @@ echo  Starting scraper with auto-login (all timers)...
 echo  ─────────────────────────────────────────────────────
 echo.
 
-python scraper/run_scraper.py --timer all --wait 120
+python scraper/run_scraper.py --timer all --wait 60
 
 :: If scraper exits, keep window open
 echo.

@@ -387,15 +387,15 @@ def auto_login(driver, phone, password, wait_seconds=120):
             print(f"\n  ✓ Ready flag detected! Starting...")
             break
 
-        # Check if game is loaded
-        if i % 5 == 0:
+        # Check for game every 3 seconds (fast detection)
+        if i % 3 == 0:
             if enter_iframe(driver, timeout=2):
                 balls = get_balls(driver)
                 safe_default_content(driver)
                 if balls:
                     print(f"\n  ✓ Game detected! Balls: {balls}")
-                    print("  Starting scraper in 3 seconds...\n")
-                    time.sleep(3)
+                    print("  Starting scraper in 2 seconds...\n")
+                    time.sleep(2)
                     return True
 
         if i % 15 == 0:
@@ -709,8 +709,8 @@ def main():
     parser = argparse.ArgumentParser(description="Win Go Auto-Scraper v5")
     parser.add_argument("--timer", default="all",
                         help="30sec, 1min, 3min, or 'all' (default: all)")
-    parser.add_argument("--wait", type=int, default=120,
-                        help="Seconds to wait for puzzle/login (default: 120)")
+    parser.add_argument("--wait", type=int, default=60,
+                        help="Seconds to wait for puzzle/login (default: 60)")
     args = parser.parse_args()
 
     print()
