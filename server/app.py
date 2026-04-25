@@ -49,8 +49,9 @@ async def lifespan(app: FastAPI):
         results = await get_all_results_ordered(timer=timer)
         if len(results) >= SEQUENCE_LENGTH + 5:
             digits = [r["digit"] for r in results]
+            timestamps = [r["timestamp"] for r in results]
             print(f"[STARTUP] Training {timer} model on {len(digits)} results...")
-            predictors[timer].train_bulk(digits, epochs=50, lr=0.001)
+            predictors[timer].train_bulk(digits, epochs=50, lr=0.001, timestamps=timestamps)
 
     # Start background trainer
     asyncio.create_task(continuous_trainer())
@@ -104,7 +105,8 @@ async def continuous_trainer():
                     training_in_progress = True
                     results = await get_all_results_ordered(timer=timer)
                     digits = [r["digit"] for r in results]
-                    result = predictors[timer].train_bulk(digits, epochs=30, lr=0.0005)
+                    timestamps = [r["timestamp"] for r in results]
+                    result = predictors[timer].train_bulk(digits, epochs=30, lr=0.0005, timestamps=timestamps)
                     print(f"[TRAINER] {timer} retrained: {result}")
                     training_in_progress = False
                     await broadcast({"type": "training_complete", "timer": timer, "result": result})
@@ -113,12 +115,12 @@ async def continuous_trainer():
             print(f"[TRAINER] Error: {e}")
 
 
-async def make_prediction_after_result(timer: str, digits: list[int]):
+async def make_prediction_after_result(timer: str, digits: list[int], timestamps: list[float] = None):
     """Generate and broadcast a prediction for a specific timer."""
     if len(digits) < 5:
         return
 
-    pred = predictors[timer].predict(digits)
+    pred = predictors[timer].predict(digits, timestamps=timestamps)
     pred["timer"] = timer
     latest_predictions[timer] = pred
 
@@ -166,9 +168,10 @@ async def submit_result(result_input: ResultInput):
     # Online model update for this timer only
     results = await get_all_results_ordered(timer=timer)
     digits = [r["digit"] for r in results]
+    timestamps = [r["timestamp"] for r in results]
 
     if timer in predictors:
-        predictors[timer].online_update(digits)
+        predictors[timer].online_update(digits, timestamps=timestamps)
 
     # Broadcast new result
     await broadcast({
@@ -178,7 +181,7 @@ async def submit_result(result_input: ResultInput):
 
     # Auto-predict next for this timer
     if auto_predict and timer in predictors:
-        await make_prediction_after_result(timer, digits)
+        await make_prediction_after_result(timer, digits, timestamps)
 
     # Get updated stats for this timer
     stats = await get_accuracy_stats(timer=timer)
@@ -225,7 +228,8 @@ async def get_prediction(timer: str = Query(default="3min")):
         return {"error": "Need more data", "count": len(digits), "timer": timer}
 
     if timer in predictors:
-        pred = predictors[timer].predict(digits)
+        timestamps = [r["timestamp"] for r in results]
+        pred = predictors[timer].predict(digits, timestamps=timestamps)
         pred["timer"] = timer
         return pred
     return {"error": f"Unknown timer: {timer}"}
@@ -278,7 +282,8 @@ async def trigger_training(timer: str = Query(default="3min")):
         return {"error": f"Unknown timer: {timer}"}
 
     training_in_progress = True
-    result = predictors[timer].train_bulk(digits, epochs=100, lr=0.001)
+    timestamps = [r["timestamp"] for r in results]
+    result = predictors[timer].train_bulk(digits, epochs=100, lr=0.001, timestamps=timestamps)
     training_in_progress = False
 
     await broadcast({"type": "training_complete", "timer": timer, "result": result})

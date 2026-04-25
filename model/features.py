@@ -1,8 +1,15 @@
 """
 Feature engineering pipeline for the prediction model.
 Transforms raw result sequences into feature vectors.
+
+Gap-aware: detects time gaps between results and marks them
+so the LSTM doesn't learn fake patterns across gaps.
+
+Time-aware: includes hour-of-day features since the game's
+RNG may have time-based patterns.
 """
 import numpy as np
+import math
 from collections import Counter, deque
 
 
@@ -13,11 +20,17 @@ class FeatureExtractor:
         self.rolling_windows = rolling_windows or [5, 10, 20, 50]
         self.markov_order = markov_order
 
-    def extract_features(self, digits: list[int], index: int) -> np.ndarray:
+        # Expected intervals between results (seconds)
+        # 30sec game = ~30s, 1min = ~60s, 3min = ~180s
+        # We use a generous gap threshold: 5x expected interval
+        self.gap_threshold = 300  # 5 minutes = definitely a gap for any timer
+
+    def extract_features(self, digits: list[int], index: int,
+                         timestamps: list[float] = None) -> np.ndarray:
         """
         Extract feature vector for a single position in the sequence.
 
-        Features:
+        Features (16 total):
         1. Normalized digit value (0-1)
         2. Binary label (0=small, 1=big)
         3. Current streak length (normalized)
@@ -26,6 +39,9 @@ class FeatureExtractor:
         9. Transition: did label change from previous?
         10. Frequency of current digit in last 20
         11-12. Last 2 labels as binary
+        13. Gap marker: 1.0 if there was a significant time gap before this result
+        14. Time since last result (normalized, capped)
+        15-16. Hour of day as cyclical (sin, cos) — captures daily patterns
         """
         features = []
 
@@ -72,11 +88,37 @@ class FeatureExtractor:
             else:
                 features.append(0.5)
 
+        # 13-14. Gap features (time-aware)
+        if timestamps and index > 0 and index < len(timestamps):
+            time_diff = timestamps[index] - timestamps[index - 1]
+            is_gap = 1.0 if time_diff > self.gap_threshold else 0.0
+            # Normalize time diff: 0 = instant, 1 = 10 minutes+
+            norm_diff = min(time_diff / 600.0, 1.0)
+        else:
+            is_gap = 0.0
+            norm_diff = 0.0
+
+        features.append(is_gap)
+        features.append(norm_diff)
+
+        # 15-16. Hour of day as cyclical features
+        if timestamps and index < len(timestamps):
+            import time as _time
+            local_time = _time.localtime(timestamps[index])
+            hour = local_time.tm_hour + local_time.tm_min / 60.0
+            features.append(math.sin(2 * math.pi * hour / 24.0))
+            features.append(math.cos(2 * math.pi * hour / 24.0))
+        else:
+            features.append(0.0)
+            features.append(0.0)
+
         return np.array(features, dtype=np.float32)
 
-    def extract_sequence_features(self, digits: list[int], seq_length: int) -> tuple:
+    def extract_sequence_features(self, digits: list[int], seq_length: int,
+                                   timestamps: list[float] = None) -> tuple:
         """
         Extract feature sequences for LSTM training.
+        Gap-aware: skips sequences that cross a time gap.
 
         Returns:
             X: array of shape (num_samples, seq_length, num_features)
@@ -89,18 +131,37 @@ class FeatureExtractor:
         y_list = []
 
         for i in range(seq_length, len(digits)):
+            # Check for gap within this sequence window
+            has_gap_in_window = False
+            if timestamps:
+                for k in range(i - seq_length + 1, i + 1):
+                    if k > 0 and k < len(timestamps):
+                        diff = timestamps[k] - timestamps[k - 1]
+                        if diff > self.gap_threshold:
+                            has_gap_in_window = True
+                            break
+
+            # Skip sequences that cross a gap — they don't represent
+            # continuous game play and would teach wrong patterns
+            if has_gap_in_window:
+                continue
+
             seq_features = []
             for j in range(i - seq_length, i):
-                feat = self.extract_features(digits, j)
+                feat = self.extract_features(digits, j, timestamps)
                 seq_features.append(feat)
 
             X_list.append(np.array(seq_features))
             # Target: next result's label
             y_list.append(1.0 if digits[i] >= 5 else 0.0)
 
+        if not X_list:
+            return np.array([]), np.array([])
+
         return np.array(X_list), np.array(y_list)
 
-    def extract_latest_sequence(self, digits: list[int], seq_length: int) -> np.ndarray:
+    def extract_latest_sequence(self, digits: list[int], seq_length: int,
+                                timestamps: list[float] = None) -> np.ndarray:
         """
         Extract the latest sequence for prediction (no target needed).
 
@@ -112,11 +173,17 @@ class FeatureExtractor:
             pad_needed = seq_length - len(digits)
             padded = [5] * pad_needed + digits  # pad with neutral value
             digits = padded
+            if timestamps:
+                # Pad timestamps with evenly spaced values
+                if timestamps:
+                    base = timestamps[0] if timestamps else 0
+                    pad_ts = [base - (pad_needed - i) * 30 for i in range(pad_needed)]
+                    timestamps = pad_ts + timestamps
 
         seq_features = []
         start = len(digits) - seq_length
         for j in range(start, len(digits)):
-            feat = self.extract_features(digits, j)
+            feat = self.extract_features(digits, j, timestamps)
             seq_features.append(feat)
 
         return np.array([seq_features], dtype=np.float32)
@@ -141,7 +208,7 @@ class FeatureExtractor:
     @property
     def num_features(self) -> int:
         """Number of features per timestep."""
-        return 12  # Update if you add more features
+        return 16  # 12 original + gap_marker + time_diff + hour_sin + hour_cos
 
 
 class MarkovChain:

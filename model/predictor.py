@@ -101,7 +101,8 @@ class EnsemblePredictor:
 
         self._initialized = True
 
-    def train_bulk(self, digits: list[int], epochs: int = 100, lr: float = 0.001) -> dict:
+    def train_bulk(self, digits: list[int], epochs: int = 100, lr: float = 0.001,
+                   timestamps: list[float] = None) -> dict:
         """Train the LSTM on bulk historical data."""
         if not self._initialized:
             self.initialize_lstm()
@@ -110,8 +111,8 @@ class EnsemblePredictor:
         labels = [1 if d >= 5 else 0 for d in digits]
         self.markov.train(labels)
 
-        # Prepare LSTM data
-        X, y = self.feature_extractor.extract_sequence_features(digits, SEQUENCE_LENGTH)
+        # Prepare LSTM data (gap-aware if timestamps available)
+        X, y = self.feature_extractor.extract_sequence_features(digits, SEQUENCE_LENGTH, timestamps)
 
         if len(X) < 10:
             return {"status": "insufficient_data", "samples": len(X)}
@@ -189,7 +190,8 @@ class EnsemblePredictor:
             "final_loss": train_losses[-1] if train_losses else 0
         }
 
-    def online_update(self, digits: list[int], lr: float = 0.0005):
+    def online_update(self, digits: list[int], lr: float = 0.0005,
+                      timestamps: list[float] = None):
         """Update the model with the latest data point (online learning)."""
         if not self._initialized or len(digits) < SEQUENCE_LENGTH + 1:
             return
@@ -199,8 +201,10 @@ class EnsemblePredictor:
         self.markov.train(labels)
 
         # Quick LSTM update on recent data
-        recent = digits[-(SEQUENCE_LENGTH + 10):]  # last few sequences
-        X, y = self.feature_extractor.extract_sequence_features(recent, SEQUENCE_LENGTH)
+        n = SEQUENCE_LENGTH + 10
+        recent = digits[-n:]
+        recent_ts = timestamps[-n:] if timestamps else None
+        X, y = self.feature_extractor.extract_sequence_features(recent, SEQUENCE_LENGTH, recent_ts)
 
         if len(X) < 1:
             return
@@ -220,7 +224,7 @@ class EnsemblePredictor:
             torch.nn.utils.clip_grad_norm_(self.lstm_model.parameters(), 1.0)
             optimizer.step()
 
-    def predict(self, digits: list[int]) -> dict:
+    def predict(self, digits: list[int], timestamps: list[float] = None) -> dict:
         """
         Generate ensemble prediction for the next outcome.
 
@@ -245,7 +249,9 @@ class EnsemblePredictor:
             try:
                 self.lstm_model.eval()
                 with torch.no_grad():
-                    X = self.feature_extractor.extract_latest_sequence(digits, SEQUENCE_LENGTH)
+                    X = self.feature_extractor.extract_latest_sequence(
+                        digits, SEQUENCE_LENGTH, timestamps
+                    )
                     X_t = torch.FloatTensor(X).to(self.device)
                     output = self.lstm_model(X_t)
                     lstm_prob = output.item()
