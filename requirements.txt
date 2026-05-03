@@ -5,6 +5,7 @@ fastapi
 uvicorn[standard]
 websockets
 aiosqlite
+httpx
 python-dotenv
 selenium
 undetected-chromedriver

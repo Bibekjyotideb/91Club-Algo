@@ -234,6 +234,8 @@ class EnsemblePredictor:
                 "confidence": float (0-1),
                 "prob_big": float (0-1),
                 "models": {model_name: {prob_big, confidence}},
+                "number": {"predicted": int, "confidence": float, "probabilities": list[float]},
+                "color": {"predicted": str, "confidence": float, "probabilities": {"red": float, "green": float, "violet": float}},
             }
         """
         if not self._initialized:
@@ -291,15 +293,201 @@ class EnsemblePredictor:
         else:
             ensemble_prob = 0.5
 
-        # Final prediction
-        prediction = "big" if ensemble_prob >= 0.5 else "small"
-        confidence = abs(ensemble_prob - 0.5) * 2
+        # ===== NUMBER PREDICTION (0-9) — the CORE prediction =====
+        number_pred = self._predict_number(digits, ensemble_prob_big=ensemble_prob)
+        predicted_digit = number_pred["predicted"]
+        probs = number_pred["probabilities"]  # 10 probabilities
+
+        # ===== DERIVE SIZE deterministically from the predicted number =====
+        # 0-4 = Small, 5-9 = Big — MUST match the predicted digit
+        size_pred = "big" if predicted_digit >= 5 else "small"
+        # Confidence: how much probability mass is on the correct side
+        prob_big_from_num = float(sum(probs[5:10]))
+        size_conf = prob_big_from_num if predicted_digit >= 5 else (1.0 - prob_big_from_num)
+        # Normalize confidence to 0-1 range (0.5 = no confidence, 1.0 = full confidence)
+        size_conf = abs(size_conf - 0.5) * 2
+
+        # ===== DERIVE COLOR deterministically from the predicted number =====
+        # Even (incl 0) = Red, Odd = Green, 0 & 5 = also Violet
+        color_pred = self._predict_color(probs, predicted_digit)
 
         return {
-            "prediction": prediction,
-            "confidence": round(confidence, 4),
-            "prob_big": round(ensemble_prob, 4),
-            "models": model_predictions
+            "prediction": size_pred,
+            "confidence": round(size_conf, 4),
+            "prob_big": round(prob_big_from_num, 4),
+            "models": model_predictions,
+            "number": number_pred,
+            "color": color_pred,
+        }
+
+    def _predict_number(self, digits: list[int], ensemble_prob_big: float = 0.5) -> dict:
+        """
+        Predict the most likely next digit (0-9).
+        
+        This is the CORE prediction — color and size are derived from this.
+        
+        Uses:
+          1. Frequency analysis — which digits appear most/least
+          2. Digit-level Markov chain — transition probabilities between digits
+          3. Recency weighting — recent digits weighted more
+          4. LSTM ensemble bias — shifts probability mass toward small (0-4) or big (5-9)
+        """
+        probs = np.ones(10) / 10.0  # uniform prior
+
+        if len(digits) < 5:
+            top = int(np.argmax(probs))
+            return {
+                "predicted": top,
+                "confidence": 0.0,
+                "probabilities": [round(float(p), 4) for p in probs],
+            }
+
+        # --- 1. Frequency-based probability (inverse = mean reversion) ---
+        window = digits[-100:] if len(digits) > 100 else digits
+        counts = np.zeros(10)
+        for d in window:
+            counts[d] += 1
+        freq_probs = counts / counts.sum()
+        
+        # Blend: slight contrarian for overrepresented digits
+        adjusted_freq = np.ones(10) / 10.0
+        for i in range(10):
+            deviation = freq_probs[i] - 0.1  # expected = 10%
+            if abs(deviation) > 0.03:
+                adjusted_freq[i] = 0.1 - deviation * 0.2
+            else:
+                adjusted_freq[i] = freq_probs[i]
+        adjusted_freq = np.clip(adjusted_freq, 0.01, 1.0)
+        adjusted_freq /= adjusted_freq.sum()
+
+        # --- 2. Digit-level Markov transitions ---
+        markov_probs = np.ones(10) / 10.0
+        order = min(3, len(digits) - 1)
+        if order >= 1:
+            transitions = {}
+            for i in range(order, len(digits)):
+                state = tuple(digits[i - order:i])
+                outcome = digits[i]
+                if state not in transitions:
+                    transitions[state] = np.zeros(10)
+                transitions[state][outcome] += 1
+            
+            current_state = tuple(digits[-order:])
+            if current_state in transitions:
+                counts = transitions[current_state]
+                total = counts.sum()
+                if total > 0:
+                    markov_probs = (counts + 0.5) / (total + 5.0)
+                    markov_probs /= markov_probs.sum()
+
+        # --- 3. Recency weighting (last 10 digits) ---
+        recency_probs = np.ones(10) / 10.0
+        recent = digits[-10:] if len(digits) >= 10 else digits
+        rec_counts = np.zeros(10)
+        for i, d in enumerate(recent):
+            weight = (i + 1) / len(recent)
+            rec_counts[d] += weight
+        if rec_counts.sum() > 0:
+            recency_probs = (rec_counts + 0.1) / (rec_counts.sum() + 1.0)
+            recency_probs /= recency_probs.sum()
+
+        # --- 4. LSTM ensemble bias ---
+        # Use the ensemble's prob_big to shift probability mass
+        # toward small digits (0-4) or big digits (5-9)
+        lstm_bias = np.ones(10) / 10.0
+        if abs(ensemble_prob_big - 0.5) > 0.01:  # only apply if LSTM has an opinion
+            for i in range(10):
+                if i >= 5:  # big digits
+                    lstm_bias[i] = 0.1 * (ensemble_prob_big / 0.5)
+                else:  # small digits
+                    lstm_bias[i] = 0.1 * ((1 - ensemble_prob_big) / 0.5)
+            lstm_bias = np.clip(lstm_bias, 0.02, 0.5)
+            lstm_bias /= lstm_bias.sum()
+
+        # --- Combine all signals ---
+        combined = (
+            0.20 * adjusted_freq +
+            0.30 * markov_probs +
+            0.15 * recency_probs +
+            0.35 * lstm_bias  # LSTM gets significant weight
+        )
+        combined /= combined.sum()
+
+        top_digit = int(np.argmax(combined))
+        top_prob = float(combined[top_digit])
+        
+        # Confidence: how much better is the top digit vs uniform (10%)
+        confidence = min((top_prob - 0.1) / 0.2, 1.0)
+        confidence = max(confidence, 0.0)
+
+        return {
+            "predicted": top_digit,
+            "confidence": round(float(confidence), 4),
+            "probabilities": [round(float(p), 4) for p in combined],
+        }
+
+    def _predict_color(self, number_probs: list[float], predicted_digit: int = -1) -> dict:
+        """
+        Derive color prediction from the predicted digit, with probability
+        distributions computed from number probabilities for informational bars.
+        
+        WinGo color rules:
+          - Even numbers (0, 2, 4, 6, 8): Red
+          - Odd numbers (1, 3, 7, 9): Green
+          - 0: Red + Violet (special)
+          - 5: Green + Violet (special)
+        """
+        probs = np.array(number_probs)
+        
+        # Probability distributions for the UI bars
+        # Green: odd numbers (1, 3, 5, 7, 9)
+        green_prob = float(probs[1] + probs[3] + probs[5] + probs[7] + probs[9])
+        
+        # Red: even numbers (0, 2, 4, 6, 8)
+        red_prob = float(probs[0] + probs[2] + probs[4] + probs[6] + probs[8])
+        
+        # Violet: specifically digits 0 and 5
+        violet_prob = float(probs[0] + probs[5])
+
+        # Determine primary color DETERMINISTICALLY from the predicted digit
+        if predicted_digit >= 0:
+            if predicted_digit == 0:
+                # 0 is Red + Violet — predict violet if violet probability is significant
+                predicted = "violet" if violet_prob > 0.25 else "red"
+            elif predicted_digit == 5:
+                # 5 is Green + Violet — predict violet if violet probability is significant
+                predicted = "violet" if violet_prob > 0.25 else "green"
+            elif predicted_digit % 2 == 0:
+                # Even (2, 4, 6, 8) = Red
+                predicted = "red"
+            else:
+                # Odd (1, 3, 7, 9) = Green
+                predicted = "green"
+        else:
+            # Fallback: no predicted digit, use probability distribution
+            if violet_prob > 0.25 and violet_prob > max(green_prob, red_prob) * 0.5:
+                predicted = "violet"
+            elif green_prob > red_prob:
+                predicted = "green"
+            else:
+                predicted = "red"
+
+        # Confidence based on the predicted color's probability mass
+        if predicted == "violet":
+            conf = (violet_prob - 0.2) / 0.3
+        elif predicted == "green":
+            conf = green_prob - red_prob
+        else:
+            conf = red_prob - green_prob
+
+        return {
+            "predicted": predicted,
+            "confidence": round(min(max(conf, 0.0), 1.0), 4),
+            "probabilities": {
+                "red": round(red_prob, 4),
+                "green": round(green_prob, 4),
+                "violet": round(violet_prob, 4),
+            },
         }
 
     def record_outcome(self, predicted: str, actual: str):

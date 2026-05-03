@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Win Go Predictor — Small/Big</title>
-    <meta name="description" content="Real-time Win Go prediction system with LSTM ensemble model">
+    <title>Win Go Predictor — Number · Color · Size</title>
+    <meta name="description" content="Real-time Win Go prediction system with LSTM ensemble model — predicts number, color, and size">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/style.css">
@@ -21,7 +21,7 @@
             </div>
             <div>
                 <h1>Win Go Predictor</h1>
-                <span class="header-subtitle">LSTM Ensemble • Real-Time Analysis</span>
+                <span class="header-subtitle">LSTM Ensemble • Number · Color · Size</span>
             </div>
         </div>
         <div class="timer-selector" id="timerSelector">
@@ -29,16 +29,20 @@
                 <span class="timer-label">30s</span>
                 <span class="timer-count" id="count-30sec">0</span>
             </button>
-            <button class="timer-tab" data-timer="1min" id="tab-1min">
+            <button class="timer-tab active" data-timer="1min" id="tab-1min">
                 <span class="timer-label">1m</span>
                 <span class="timer-count" id="count-1min">0</span>
             </button>
-            <button class="timer-tab active" data-timer="3min" id="tab-3min">
+            <button class="timer-tab" data-timer="3min" id="tab-3min">
                 <span class="timer-label">3m</span>
                 <span class="timer-count" id="count-3min">0</span>
             </button>
         </div>
         <div class="header-right">
+            <div class="poller-status" id="pollerStatus" title="API Poller Status">
+                <span class="poller-dot active"></span>
+                <span class="poller-text">API Live</span>
+            </div>
             <div class="connection-status" id="connectionStatus">
                 <span class="status-dot"></span>
                 <span class="status-text">Connecting...</span>
@@ -47,33 +51,98 @@
     </header>
 
     <main class="main-grid">
-        <!-- ============ TOP ROW: PREDICTION + STATS ============ -->
-        <section class="prediction-card" id="predictionCard">
-            <div class="card-header">
-                <h2>Next Prediction</h2>
-                <span class="badge" id="modelBadge">Ensemble</span>
+        <!-- ============ TOP ROW: 3 PREDICTION CARDS ============ -->
+        <section class="predictions-row">
+            <!-- NUMBER Prediction -->
+            <div class="pred-card number-pred-card" id="numberPredCard">
+                <div class="card-header">
+                    <h2>Number</h2>
+                    <span class="badge badge-number">0-9</span>
+                </div>
+                <div class="number-display">
+                    <div class="predicted-number" id="predictedNumber">--</div>
+                    <div class="number-conf" id="numberConf">--</div>
+                    <div class="period-info" id="numberPeriod">Period: --</div>
+                </div>
+                <div class="number-probabilities" id="numberProbabilities">
+                    <div class="prob-bar-row" data-digit="0"><span class="prob-digit">0</span><div class="prob-track"><div class="prob-fill red" id="prob-0"></div></div><span class="prob-pct" id="probPct-0">—</span></div>
+                    <div class="prob-bar-row" data-digit="1"><span class="prob-digit">1</span><div class="prob-track"><div class="prob-fill green" id="prob-1"></div></div><span class="prob-pct" id="probPct-1">—</span></div>
+                    <div class="prob-bar-row" data-digit="2"><span class="prob-digit">2</span><div class="prob-track"><div class="prob-fill red" id="prob-2"></div></div><span class="prob-pct" id="probPct-2">—</span></div>
+                    <div class="prob-bar-row" data-digit="3"><span class="prob-digit">3</span><div class="prob-track"><div class="prob-fill green" id="prob-3"></div></div><span class="prob-pct" id="probPct-3">—</span></div>
+                    <div class="prob-bar-row" data-digit="4"><span class="prob-digit">4</span><div class="prob-track"><div class="prob-fill red" id="prob-4"></div></div><span class="prob-pct" id="probPct-4">—</span></div>
+                    <div class="prob-bar-row" data-digit="5"><span class="prob-digit">5</span><div class="prob-track"><div class="prob-fill green" id="prob-5"></div></div><span class="prob-pct" id="probPct-5">—</span></div>
+                    <div class="prob-bar-row" data-digit="6"><span class="prob-digit">6</span><div class="prob-track"><div class="prob-fill red" id="prob-6"></div></div><span class="prob-pct" id="probPct-6">—</span></div>
+                    <div class="prob-bar-row" data-digit="7"><span class="prob-digit">7</span><div class="prob-track"><div class="prob-fill green" id="prob-7"></div></div><span class="prob-pct" id="probPct-7">—</span></div>
+                    <div class="prob-bar-row" data-digit="8"><span class="prob-digit">8</span><div class="prob-track"><div class="prob-fill red" id="prob-8"></div></div><span class="prob-pct" id="probPct-8">—</span></div>
+                    <div class="prob-bar-row" data-digit="9"><span class="prob-digit">9</span><div class="prob-track"><div class="prob-fill green" id="prob-9"></div></div><span class="prob-pct" id="probPct-9">—</span></div>
+                </div>
             </div>
-            <div class="prediction-display">
-                <div class="prediction-label" id="predictionLabel">—</div>
-                <div class="confidence-ring" id="confidenceRing">
-                    <svg viewBox="0 0 120 120">
-                        <circle class="ring-bg" cx="60" cy="60" r="52" />
-                        <circle class="ring-fill" id="ringFill" cx="60" cy="60" r="52" />
-                    </svg>
-                    <div class="confidence-text">
-                        <span class="conf-value" id="confValue">—</span>
-                        <span class="conf-label">confidence</span>
+
+            <!-- COLOR Prediction -->
+            <div class="pred-card color-pred-card" id="colorPredCard">
+                <div class="card-header">
+                    <h2>Color</h2>
+                    <span class="badge badge-color">R/G/V</span>
+                </div>
+                <div class="color-display">
+                    <div class="predicted-color" id="predictedColor">--</div>
+                    <div class="color-conf" id="colorConf">--</div>
+                    <div class="period-info" id="colorPeriod">Period: --</div>
+                </div>
+                <div class="color-bars">
+                    <div class="color-bar-item">
+                        <div class="color-swatch red-swatch"></div>
+                        <span class="color-name">Red</span>
+                        <div class="color-track"><div class="color-fill red-fill" id="colorBarRed"></div></div>
+                        <span class="color-pct" id="colorPctRed">—</span>
+                    </div>
+                    <div class="color-bar-item">
+                        <div class="color-swatch green-swatch"></div>
+                        <span class="color-name">Green</span>
+                        <div class="color-track"><div class="color-fill green-fill" id="colorBarGreen"></div></div>
+                        <span class="color-pct" id="colorPctGreen">—</span>
+                    </div>
+                    <div class="color-bar-item">
+                        <div class="color-swatch violet-swatch"></div>
+                        <span class="color-name">Violet</span>
+                        <div class="color-track"><div class="color-fill violet-fill" id="colorBarViolet"></div></div>
+                        <span class="color-pct" id="colorPctViolet">—</span>
                     </div>
                 </div>
             </div>
-            <div class="model-breakdown" id="modelBreakdown">
-                <div class="model-row"><span class="model-name">LSTM</span><div class="model-bar"><div class="model-fill" id="lstmBar"></div></div><span class="model-pct" id="lstmPct">—</span></div>
-                <div class="model-row"><span class="model-name">Markov</span><div class="model-bar"><div class="model-fill markov" id="markovBar"></div></div><span class="model-pct" id="markovPct">—</span></div>
-                <div class="model-row"><span class="model-name">Pattern</span><div class="model-bar"><div class="model-fill pattern" id="patternBar"></div></div><span class="model-pct" id="patternPct">—</span></div>
-                <div class="model-row"><span class="model-name">Frequency</span><div class="model-bar"><div class="model-fill frequency" id="freqBar"></div></div><span class="model-pct" id="freqPct">—</span></div>
+
+            <!-- SIZE (Small/Big) Prediction -->
+            <div class="pred-card prediction-card" id="predictionCard">
+                <div class="card-header">
+                    <h2>Size</h2>
+                    <span class="badge" id="modelBadge">Ensemble</span>
+                </div>
+                <div class="prediction-display">
+                    <div>
+                        <div class="prediction-label" id="predictionLabel">--</div>
+                        <div class="period-info" id="sizePeriod">Period: --</div>
+                    </div>
+                    <div class="confidence-ring" id="confidenceRing">
+                        <svg viewBox="0 0 120 120">
+                            <circle class="ring-bg" cx="60" cy="60" r="52" />
+                            <circle class="ring-fill" id="ringFill" cx="60" cy="60" r="52" />
+                        </svg>
+                        <div class="confidence-text">
+                            <span class="conf-value" id="confValue">—</span>
+                            <span class="conf-label">confidence</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="model-breakdown" id="modelBreakdown">
+                    <div class="model-row"><span class="model-name">LSTM</span><div class="model-bar"><div class="model-fill" id="lstmBar"></div></div><span class="model-pct" id="lstmPct">—</span></div>
+                    <div class="model-row"><span class="model-name">Markov</span><div class="model-bar"><div class="model-fill markov" id="markovBar"></div></div><span class="model-pct" id="markovPct">—</span></div>
+                    <div class="model-row"><span class="model-name">Pattern</span><div class="model-bar"><div class="model-fill pattern" id="patternBar"></div></div><span class="model-pct" id="patternPct">—</span></div>
+                    <div class="model-row"><span class="model-name">Frequency</span><div class="model-bar"><div class="model-fill frequency" id="freqBar"></div></div><span class="model-pct" id="freqPct">—</span></div>
+                </div>
             </div>
         </section>
 
+        <!-- ============ STATS ROW ============ -->
         <section class="stats-grid">
             <div class="stat-card">
                 <div class="stat-icon accuracy-icon">
@@ -122,7 +191,7 @@
             <div class="results-feed" id="resultsFeed">
                 <div class="empty-state">
                     <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-                    <p>No results yet. Add results below or start the scraper.</p>
+                    <p>Waiting for results from API poller...</p>
                 </div>
             </div>
         </section>
@@ -143,16 +212,16 @@
                 <span class="input-hint">Tap the result digit</span>
             </div>
             <div class="digit-grid" id="digitGrid">
-                <button class="digit-btn small" data-digit="0" id="btn-digit-0">0</button>
-                <button class="digit-btn small" data-digit="1" id="btn-digit-1">1</button>
-                <button class="digit-btn small" data-digit="2" id="btn-digit-2">2</button>
-                <button class="digit-btn small" data-digit="3" id="btn-digit-3">3</button>
-                <button class="digit-btn small" data-digit="4" id="btn-digit-4">4</button>
-                <button class="digit-btn big" data-digit="5" id="btn-digit-5">5</button>
-                <button class="digit-btn big" data-digit="6" id="btn-digit-6">6</button>
-                <button class="digit-btn big" data-digit="7" id="btn-digit-7">7</button>
-                <button class="digit-btn big" data-digit="8" id="btn-digit-8">8</button>
-                <button class="digit-btn big" data-digit="9" id="btn-digit-9">9</button>
+                <button class="digit-btn red-btn" data-digit="0" id="btn-digit-0">0</button>
+                <button class="digit-btn green-btn" data-digit="1" id="btn-digit-1">1</button>
+                <button class="digit-btn red-btn" data-digit="2" id="btn-digit-2">2</button>
+                <button class="digit-btn green-btn" data-digit="3" id="btn-digit-3">3</button>
+                <button class="digit-btn red-btn" data-digit="4" id="btn-digit-4">4</button>
+                <button class="digit-btn green-btn" data-digit="5" id="btn-digit-5">5</button>
+                <button class="digit-btn red-btn" data-digit="6" id="btn-digit-6">6</button>
+                <button class="digit-btn green-btn" data-digit="7" id="btn-digit-7">7</button>
+                <button class="digit-btn red-btn" data-digit="8" id="btn-digit-8">8</button>
+                <button class="digit-btn green-btn" data-digit="9" id="btn-digit-9">9</button>
             </div>
             <div class="bulk-input">
                 <label for="bulkInput">Bulk Input (space-separated digits):</label>
@@ -190,7 +259,7 @@
                 <span>Training in progress...</span>
             </div>
             <div class="log-box" id="logBox">
-                <div class="log-entry">System ready. Add results to begin.</div>
+                <div class="log-entry">System ready. API poller is fetching results automatically.</div>
             </div>
         </section>
 
@@ -199,13 +268,13 @@
             <div class="card-header">
                 <h2>Prediction History</h2>
             </div>
-            <div class="history-table-wrap">
+            <!-- Desktop table -->
+            <div class="history-table-wrap desktop-only">
                 <table class="history-table" id="historyTable">
                     <thead>
                         <tr>
-                            <th>#</th>
+                            <th>Period</th>
                             <th>Predicted</th>
-                            <th>Confidence</th>
                             <th>Actual</th>
                             <th>Result</th>
                         </tr>
@@ -213,6 +282,9 @@
                     <tbody id="historyBody">
                     </tbody>
                 </table>
+            </div>
+            <!-- Mobile cards -->
+            <div class="history-cards mobile-only" id="historyCards">
             </div>
         </section>
     </main>

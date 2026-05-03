@@ -65,6 +65,14 @@ async def init_db():
             except Exception:
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN timer TEXT DEFAULT '3min'")
 
+        # Migration: add number/color prediction columns
+        for col, default in [("predicted_number", "'-1'"), ("predicted_color", "''"),
+                             ("actual_digit", "'-1'"), ("actual_color", "''")]:
+            try:
+                await db.execute(f"SELECT {col} FROM predictions LIMIT 1")
+            except Exception:
+                await db.execute(f"ALTER TABLE predictions ADD COLUMN {col} TEXT DEFAULT {default}")
+
         # Create timer indexes (safe now that column exists)
         await db.executescript("""
             CREATE INDEX IF NOT EXISTS idx_results_timer ON results(timer);
@@ -118,14 +126,17 @@ async def add_result(digit: int, round_id: str = None, color: str = "",
 
 
 async def add_prediction(predicted_label: str, confidence: float, round_id: str = None,
-                         model_used: str = "ensemble", timer: str = "3min") -> int:
-    """Record a prediction."""
+                         model_used: str = "ensemble", timer: str = "3min",
+                         predicted_number: int = -1, predicted_color: str = "") -> int:
+    """Record a prediction with number and color."""
     ts = time.time()
     db = await get_db()
     try:
         cursor = await db.execute(
-            "INSERT INTO predictions (round_id, predicted_label, confidence, model_used, timestamp, timer) VALUES (?, ?, ?, ?, ?, ?)",
-            (round_id, predicted_label, confidence, model_used, ts, timer)
+            """INSERT INTO predictions
+               (round_id, predicted_label, confidence, model_used, timestamp, timer, predicted_number, predicted_color)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (round_id, predicted_label, confidence, model_used, ts, timer, str(predicted_number), predicted_color)
         )
         await db.commit()
         return cursor.lastrowid
@@ -133,8 +144,9 @@ async def add_prediction(predicted_label: str, confidence: float, round_id: str 
         await db.close()
 
 
-async def update_prediction_result(prediction_id: int, actual_label: str):
-    """Update a prediction with the actual result."""
+async def update_prediction_result(prediction_id: int, actual_label: str,
+                                    actual_digit: int = -1, actual_color: str = ""):
+    """Update a prediction with the actual result including digit and color."""
     correct = None
     db = await get_db()
     try:
@@ -144,8 +156,8 @@ async def update_prediction_result(prediction_id: int, actual_label: str):
         if row:
             correct = 1 if row[0][0] == actual_label else 0
         await db.execute(
-            "UPDATE predictions SET actual_label = ?, correct = ? WHERE id = ?",
-            (actual_label, correct, prediction_id)
+            "UPDATE predictions SET actual_label = ?, correct = ?, actual_digit = ?, actual_color = ? WHERE id = ?",
+            (actual_label, correct, str(actual_digit), actual_color, prediction_id)
         )
         await db.commit()
         return correct
@@ -198,7 +210,7 @@ async def get_all_results_ordered(timer: str = None) -> list:
 
 
 async def get_recent_predictions(limit: int = 50, timer: str = None) -> list:
-    """Get recent predictions with their outcomes."""
+    """Get recent predictions with their outcomes, including number and color."""
     db = await get_db()
     try:
         if timer:
@@ -218,6 +230,18 @@ async def get_recent_predictions(limit: int = 50, timer: str = None) -> list:
                 r["timer"] = row[8]
             except (IndexError, KeyError):
                 r["timer"] = "3min"
+            try:
+                r["predicted_number"] = row[9]
+                r["predicted_color"] = row[10]
+            except (IndexError, KeyError):
+                r["predicted_number"] = "-1"
+                r["predicted_color"] = ""
+            try:
+                r["actual_digit"] = row[11]
+                r["actual_color"] = row[12]
+            except (IndexError, KeyError):
+                r["actual_digit"] = "-1"
+                r["actual_color"] = ""
             results.append(r)
         return results
     finally:

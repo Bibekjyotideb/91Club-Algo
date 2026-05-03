@@ -1,6 +1,7 @@
 """
 FastAPI server — REST API + WebSocket for real-time updates + serves the dashboard.
 Maintains separate models per timer (30sec, 1min, 3min).
+Includes built-in API poller — no separate scraper needed.
 """
 import os
 import sys
@@ -21,6 +22,7 @@ from data.database import init_db, add_result, get_recent_results, get_all_resul
     get_result_count, get_timer_counts, extract_timer
 from model.predictor import EnsemblePredictor
 from config import SEQUENCE_LENGTH, HOST, PORT
+from scraper.api_poller import WinGoPoller
 
 # --- Global State ---
 # Separate predictor per timer
@@ -31,11 +33,61 @@ latest_predictions: dict[str, dict] = {}  # per timer
 pending_prediction_ids: dict[str, Optional[int]] = {}  # per timer
 training_in_progress = False
 auto_predict = True
+poller_instance: Optional[WinGoPoller] = None
+poller_status = {"active": False, "captured": {}}
+
+
+# --- API Poller Callback ---
+async def on_api_result(digit: int, round_id: str, color: str, timer: str):
+    """Called by the API poller when a new result is detected."""
+    # Store result
+    result = await add_result(
+        digit=digit,
+        round_id=round_id,
+        color=color,
+        source=f"api_poller_{timer}",
+        timer=timer,
+    )
+
+    # Update pending prediction for this timer
+    if pending_prediction_ids.get(timer):
+        correct = await update_prediction_result(
+            pending_prediction_ids[timer], result["label"],
+            actual_digit=digit, actual_color=color
+        )
+        result["prediction_correct"] = correct
+        pending_prediction_ids[timer] = None
+
+    # Online model update for this timer only
+    results = await get_all_results_ordered(timer=timer)
+    digits = [r["digit"] for r in results]
+    timestamps = [r["timestamp"] for r in results]
+
+    if timer in predictors:
+        predictors[timer].online_update(digits, timestamps=timestamps)
+
+    # Broadcast new result
+    await broadcast({
+        "type": "result",
+        "data": result
+    })
+
+    # Auto-predict next for this timer
+    if auto_predict and timer in predictors:
+        await make_prediction_after_result(timer, digits, timestamps, round_id=round_id)
+
+    # Get updated stats for this timer
+    stats = await get_accuracy_stats(timer=timer)
+    await broadcast({"type": "stats", "data": stats})
+
+    # Update poller status
+    poller_status["captured"][timer] = poller_status["captured"].get(timer, 0) + 1
 
 
 # --- Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global poller_instance
     await init_db()
 
     # Initialize a separate model per timer
@@ -56,7 +108,21 @@ async def lifespan(app: FastAPI):
     # Start background trainer
     asyncio.create_task(continuous_trainer())
 
+    # Start API poller (replaces Selenium scraper)
+    poller_instance = WinGoPoller(
+        timers=TIMERS,
+        on_new_result=on_api_result,
+    )
+    poller_status["active"] = True
+    asyncio.create_task(poller_instance.run())
+    print("[STARTUP] API poller started for all timers")
+
     yield
+
+    # Shutdown
+    if poller_instance:
+        poller_instance.stop()
+        poller_status["active"] = False
 
     for timer in TIMERS:
         predictors[timer].save()
@@ -115,20 +181,34 @@ async def continuous_trainer():
             print(f"[TRAINER] Error: {e}")
 
 
-async def make_prediction_after_result(timer: str, digits: list[int], timestamps: list[float] = None):
+async def make_prediction_after_result(timer: str, digits: list[int], timestamps: list[float] = None, round_id: str = None):
     """Generate and broadcast a prediction for a specific timer."""
     if len(digits) < 5:
         return
 
+    # The prediction is for the NEXT round, so increment the round_id
+    next_round_id = None
+    if round_id:
+        try:
+            next_round_id = str(int(round_id) + 1)
+        except (ValueError, TypeError):
+            next_round_id = round_id  # fallback if non-numeric
+
     pred = predictors[timer].predict(digits, timestamps=timestamps)
     pred["timer"] = timer
+    pred["for_round"] = next_round_id  # the round this prediction is FOR
     latest_predictions[timer] = pred
 
-    # Store prediction
+    # Store prediction with number and color
+    num_pred = pred.get("number", {}).get("predicted", -1)
+    color_pred = pred.get("color", {}).get("predicted", "")
     pending_prediction_ids[timer] = await add_prediction(
         predicted_label=pred["prediction"],
         confidence=pred["confidence"],
-        timer=timer
+        timer=timer,
+        predicted_number=num_pred,
+        predicted_color=color_pred,
+        round_id=next_round_id,
     )
 
     pred["pending_id"] = pending_prediction_ids[timer]
@@ -161,7 +241,10 @@ async def submit_result(result_input: ResultInput):
 
     # Update pending prediction for this timer
     if pending_prediction_ids.get(timer):
-        correct = await update_prediction_result(pending_prediction_ids[timer], result["label"])
+        correct = await update_prediction_result(
+            pending_prediction_ids[timer], result["label"],
+            actual_digit=result_input.digit, actual_color=result_input.color
+        )
         result["prediction_correct"] = correct
         pending_prediction_ids[timer] = None
 
@@ -305,6 +388,17 @@ async def reset_model(timer: str = Query(default="3min")):
         predictors[timer].initialize_lstm()
         return {"status": "model_reset", "timer": timer}
     return {"error": f"Unknown timer: {timer}"}
+
+
+@app.get("/api/poller/status")
+async def get_poller_status():
+    """Get API poller status."""
+    return {
+        "active": poller_status["active"],
+        "captured": poller_status["captured"],
+        "total": sum(poller_status["captured"].values()),
+        "timers": TIMERS,
+    }
 
 
 # --- WebSocket ---

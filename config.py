@@ -41,6 +41,15 @@ MODEL_DIR = os.path.join(BASE_DIR, "model", "checkpoints")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-# --- Scraper ---
-SCRAPER_POLL_INTERVAL = 5  # seconds between page polls
+# --- API Poller (replaces Selenium scraper) ---
+API_BASE_URL = "https://draw.ar-lottery01.com"
+API_POLL_INTERVALS = {
+    "30sec": 8,   # seconds between polls
+    "1min": 15,
+    "3min": 30,
+}
+API_BACKFILL_ON_START = True  # fetch initial batch of results on startup
+
+# --- Legacy Scraper (deprecated, kept for reference) ---
+SCRAPER_POLL_INTERVAL = 5
 SITE_URL = "https://91clu.org/"

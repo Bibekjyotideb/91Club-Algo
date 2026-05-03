@@ -1,0 +1,12 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+data/predictions.db
+data/page_dump.html
+data/scraper_ready.flag
+model/checkpoints/*.pt
+.env
+*.bat
+scraper/run_scraper.py
+scraper/analyze_html.py
