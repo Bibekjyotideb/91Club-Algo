@@ -7,7 +7,7 @@ import os
 import time
 from typing import Optional
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "predictions.db")
+from config import DB_PATH
 
 
 async def get_db():
