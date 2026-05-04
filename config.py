@@ -36,8 +36,9 @@ MARKOV_ORDER = 4                                               # Markov chain me
 
 # --- Paths ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "data", "predictions.db")
-MODEL_DIR = os.path.join(BASE_DIR, "model", "checkpoints")
+STORAGE_DIR = os.getenv("STORAGE_DIR", BASE_DIR)  # Docker: /app/storage, Local: project root
+DB_PATH = os.path.join(STORAGE_DIR, "data", "predictions.db")
+MODEL_DIR = os.path.join(STORAGE_DIR, "model", "checkpoints")
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 os.makedirs(MODEL_DIR, exist_ok=True)
 
