@@ -8,12 +8,15 @@ import sys
 import asyncio
 import time
 import json
+import hashlib
+import secrets
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request, Cookie
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -35,6 +38,20 @@ training_in_progress = False
 auto_predict = True
 poller_instance: Optional[WinGoPoller] = None
 poller_status = {"active": False, "captured": {}}
+
+# --- Auth ---
+AUTH_USERNAME = os.getenv("DASHBOARD_USER", "Bibekjyoti")
+AUTH_PASSWORD = os.getenv("DASHBOARD_PASS", "Bibek@7085")
+SESSION_SECRET = os.getenv("SESSION_SECRET", secrets.token_hex(32))
+
+def make_session_token(username: str) -> str:
+    """Create a signed session token."""
+    return hashlib.sha256(f"{SESSION_SECRET}:{username}".encode()).hexdigest()
+
+VALID_TOKEN = make_session_token(AUTH_USERNAME)
+
+# Paths that don't require auth
+PUBLIC_PATHS = {"/login", "/api/login"}
 
 
 # --- API Poller Callback ---
@@ -129,6 +146,25 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Win Go Predictor", lifespan=lifespan)
+
+
+# --- Auth Middleware ---
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        # Allow public paths and static files
+        if path in PUBLIC_PATHS or path.startswith("/static/") or path == "/ws":
+            return await call_next(request)
+        # Check session cookie
+        session = request.cookies.get("session")
+        if session != VALID_TOKEN:
+            # API calls get 401, page requests get redirected
+            if path.startswith("/api/"):
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return RedirectResponse("/login")
+        return await call_next(request)
+
+app.add_middleware(AuthMiddleware)
 
 
 # --- Pydantic Models ---
@@ -464,8 +500,45 @@ async def websocket_endpoint(websocket: WebSocket):
             connected_clients.remove(websocket)
 
 
+# --- Auth Endpoints ---
+
+class LoginInput(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/login")
+async def login(creds: LoginInput):
+    """Authenticate and set session cookie."""
+    if creds.username == AUTH_USERNAME and creds.password == AUTH_PASSWORD:
+        response = JSONResponse({"success": True})
+        response.set_cookie(
+            key="session",
+            value=VALID_TOKEN,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            max_age=30 * 24 * 3600,  # 30 days
+        )
+        return response
+    return JSONResponse({"success": False, "error": "Invalid username or password"}, status_code=401)
+
+
+@app.post("/api/logout")
+async def logout():
+    """Clear session cookie."""
+    response = JSONResponse({"success": True})
+    response.delete_cookie("session")
+    return response
+
+
 # --- Static Files (Dashboard) ---
 dashboard_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dashboard")
+
+
+@app.get("/login")
+async def serve_login():
+    return FileResponse(os.path.join(dashboard_dir, "login.html"))
 
 
 @app.get("/")
