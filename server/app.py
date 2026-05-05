@@ -120,7 +120,7 @@ async def lifespan(app: FastAPI):
             digits = [r["digit"] for r in results]
             timestamps = [r["timestamp"] for r in results]
             print(f"[STARTUP] Training {timer} model on {len(digits)} results...")
-            predictors[timer].train_bulk(digits, epochs=50, lr=0.001, timestamps=timestamps)
+            predictors[timer].train_bulk(digits, epochs=15, lr=0.001, timestamps=timestamps)
 
     # Start background trainer
     asyncio.create_task(continuous_trainer())
@@ -199,7 +199,7 @@ async def continuous_trainer():
     """Periodically retrain each timer's model on its own data."""
     global training_in_progress
     while True:
-        await asyncio.sleep(300)  # every 5 minutes
+        await asyncio.sleep(1800)  # every 30 minutes (gentle on low-power servers)
         try:
             for timer in TIMERS:
                 count = await get_result_count(timer=timer)
@@ -208,10 +208,11 @@ async def continuous_trainer():
                     results = await get_all_results_ordered(timer=timer)
                     digits = [r["digit"] for r in results]
                     timestamps = [r["timestamp"] for r in results]
-                    result = predictors[timer].train_bulk(digits, epochs=30, lr=0.0005, timestamps=timestamps)
+                    result = predictors[timer].train_bulk(digits, epochs=10, lr=0.0005, timestamps=timestamps)
                     print(f"[TRAINER] {timer} retrained: {result}")
                     training_in_progress = False
                     await broadcast({"type": "training_complete", "timer": timer, "result": result})
+                    await asyncio.sleep(5)  # breathe between timers
         except Exception as e:
             training_in_progress = False
             print(f"[TRAINER] Error: {e}")
