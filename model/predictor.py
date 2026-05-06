@@ -391,27 +391,28 @@ class EnsemblePredictor:
             recency_probs = (rec_counts + 0.1) / (rec_counts.sum() + 1.0)
             recency_probs /= recency_probs.sum()
 
-        # --- 4. LSTM ensemble bias ---
-        # Use the ensemble's prob_big to shift probability mass
-        # toward small digits (0-4) or big digits (5-9)
-        lstm_bias = np.ones(10) / 10.0
-        if abs(ensemble_prob_big - 0.5) > 0.01:  # only apply if LSTM has an opinion
-            for i in range(10):
-                if i >= 5:  # big digits
-                    lstm_bias[i] = 0.1 * (ensemble_prob_big / 0.5)
-                else:  # small digits
-                    lstm_bias[i] = 0.1 * ((1 - ensemble_prob_big) / 0.5)
-            lstm_bias = np.clip(lstm_bias, 0.02, 0.5)
-            lstm_bias /= lstm_bias.sum()
-
         # --- Combine all signals ---
-        combined = (
-            0.20 * adjusted_freq +
-            0.30 * markov_probs +
-            0.15 * recency_probs +
-            0.35 * lstm_bias  # LSTM gets significant weight
+        # Base combined signals (frequency, markov, recency)
+        base_combined = (
+            0.40 * adjusted_freq +
+            0.40 * markov_probs +
+            0.20 * recency_probs
         )
-        combined /= combined.sum()
+        
+        # --- The Hard Mask ---
+        # Strictly enforce the ensemble's Big vs Small decision
+        is_ensemble_big = ensemble_prob_big >= 0.5
+        
+        masked_combined = base_combined.copy()
+        
+        for i in range(10):
+            if is_ensemble_big and i < 5:
+                masked_combined[i] *= 0.0001  # Banish Small digits if AI predicts Big
+            elif not is_ensemble_big and i >= 5:
+                masked_combined[i] *= 0.0001  # Banish Big digits if AI predicts Small
+                
+        # Normalize the final masked probabilities
+        combined = masked_combined / masked_combined.sum()
 
         top_digit = int(np.argmax(combined))
         top_prob = float(combined[top_digit])
