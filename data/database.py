@@ -5,6 +5,7 @@ Supports per-timer separation (30sec, 1min, 3min).
 import aiosqlite
 import os
 import time
+import datetime
 from typing import Optional
 
 from config import DB_PATH
@@ -334,5 +335,142 @@ async def get_timer_counts() -> dict:
             "SELECT timer, COUNT(*) FROM results GROUP BY timer ORDER BY COUNT(*) DESC"
         )
         return {row[0]: row[1] for row in rows}
+    finally:
+        await db.close()
+
+
+async def get_advanced_stats(timer: str = None, tz_offset_minutes: int = -330) -> dict:
+    """Calculate advanced stats: streaks, trend, best times based on local timezone."""
+    db = await get_db()
+    try:
+        # Get predictions for the last 30 days
+        now_ts = time.time()
+        thirty_days_ago = now_ts - (30 * 24 * 3600)
+        
+        timer_filter = "timer = ? AND correct IS NOT NULL AND timestamp >= ?" if timer else "correct IS NOT NULL AND timestamp >= ?"
+        params = (timer, thirty_days_ago) if timer else (thirty_days_ago,)
+        
+        rows = await db.execute_fetchall(
+            f"SELECT correct, timestamp FROM predictions WHERE {timer_filter} ORDER BY timestamp ASC",
+            params
+        )
+        
+        def to_local_date(ts):
+            local_ts = ts - (tz_offset_minutes * 60)
+            return datetime.datetime.utcfromtimestamp(local_ts).date()
+            
+        def to_local_hour(ts):
+            local_ts = ts - (tz_offset_minutes * 60)
+            return datetime.datetime.utcfromtimestamp(local_ts).hour
+        
+        today_date = to_local_date(now_ts)
+        start_of_week = today_date - datetime.timedelta(days=today_date.weekday())
+        start_of_month = today_date.replace(day=1)
+        
+        buckets = {
+            "today": {"rows": []},
+            "week": {"rows": []},
+            "month": {"rows": []}
+        }
+        
+        daily_accuracy = {}
+        
+        for row in rows:
+            correct = row[0]
+            ts = row[1]
+            row_date = to_local_date(ts)
+            
+            date_str = row_date.strftime('%m/%d')
+            if date_str not in daily_accuracy:
+                daily_accuracy[date_str] = {"correct": 0, "total": 0}
+            daily_accuracy[date_str]["total"] += 1
+            if correct == 1:
+                daily_accuracy[date_str]["correct"] += 1
+                
+            if row_date == today_date:
+                buckets["today"]["rows"].append((correct, ts))
+            if row_date >= start_of_week:
+                buckets["week"]["rows"].append((correct, ts))
+            if row_date >= start_of_month:
+                buckets["month"]["rows"].append((correct, ts))
+                
+        def calc_streaks(bucket_rows):
+            max_w, max_l = 0, 0
+            cur_w, cur_l = 0, 0
+            for r in bucket_rows:
+                c = r[0]
+                if c == 1:
+                    cur_w += 1
+                    cur_l = 0
+                    if cur_w > max_w: max_w = cur_w
+                else:
+                    cur_l += 1
+                    cur_w = 0
+                    if cur_l > max_l: max_l = cur_l
+            return {"max_wins": max_w, "max_losses": max_l}
+            
+        def calc_best_times(bucket_rows):
+            window = []
+            hour_stats = {h: {"above_55_count": 0, "total": 0} for h in range(24)}
+            for r in bucket_rows:
+                c, ts = r
+                window.append(c)
+                if len(window) > 20:
+                    window.pop(0)
+                if len(window) == 20:
+                    acc = sum(window) / 20.0
+                    hr = to_local_hour(ts)
+                    hour_stats[hr]["total"] += 1
+                    if acc > 0.55:
+                        hour_stats[hr]["above_55_count"] += 1
+            
+            valid_hours = []
+            for h, stats in hour_stats.items():
+                if stats["total"] >= 5:
+                    pct = stats["above_55_count"] / stats["total"]
+                    if pct > 0:
+                        valid_hours.append({"hour": h, "pct": pct, "count": stats["above_55_count"]})
+            
+            valid_hours.sort(key=lambda x: (x["pct"], x["count"]), reverse=True)
+            
+            if not valid_hours:
+                return "Not enough data"
+                
+            top_hours = [x["hour"] for x in valid_hours[:3]]
+            top_hours.sort()
+            
+            def format_hr(h):
+                h = h % 24
+                ampm = "PM" if h >= 12 else "AM"
+                h12 = h % 12
+                if h12 == 0: h12 = 12
+                return f"{h12}{ampm}"
+                
+            formatted = []
+            for h in top_hours:
+                formatted.append(f"{format_hr(h)}-{format_hr(h+1)}")
+            
+            return ", ".join(formatted)
+
+        trend_data = []
+        # Sort properly by taking the latest 10 days
+        sorted_dates = sorted(daily_accuracy.keys())[-10:]
+        for d in sorted_dates:
+            stats = daily_accuracy[d]
+            acc = round(stats["correct"] / stats["total"] * 100, 1) if stats["total"] > 0 else 0
+            trend_data.append({"date": d, "accuracy": acc})
+
+        return {
+            "streaks": {
+                "today": calc_streaks(buckets["today"]["rows"]),
+                "week": calc_streaks(buckets["week"]["rows"]),
+                "month": calc_streaks(buckets["month"]["rows"]),
+            },
+            "best_times": {
+                "week": calc_best_times(buckets["week"]["rows"]),
+                "month": calc_best_times(buckets["month"]["rows"])
+            },
+            "trend": trend_data
+        }
     finally:
         await db.close()

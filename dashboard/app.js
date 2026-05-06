@@ -10,6 +10,7 @@ let reconnectTimer = null;
 let autoPredict = true;
 let resultCount = 0;
 let activeTimer = '1min';
+let trendChart = null;
 
 let timerPredictions = { '30sec': null, '1min': null, '3min': null };
 
@@ -89,7 +90,7 @@ function switchTimer(timer) {
     else clearAllPredictions();
     if (ws && ws.readyState === WebSocket.OPEN)
         ws.send(JSON.stringify({ type: 'switch_timer', timer }));
-    fetchStats(); fetchPredictionHistory(); fetchFreshPrediction(timer);
+    fetchStats(); fetchPredictionHistory(); fetchFreshPrediction(timer); fetchAdvancedStats(timer);
     addLog(`Switched to ${timer} timer`);
 }
 
@@ -350,6 +351,89 @@ async function fetchPredictionHistory() {
     } catch (e) { console.error('Predictions fetch failed:', e); }
 }
 
+// ============ ADVANCED STATS ============
+async function fetchAdvancedStats(timer) {
+    try {
+        const offset = new Date().getTimezoneOffset() * -1; // sending minutes offset from UTC (e.g. +330 for IST)
+        const resp = await fetch(`/api/advanced_stats?timer=${timer}&tz_offset=${offset}`);
+        const data = await resp.json();
+        
+        // Render Streaks
+        if (data.streaks) {
+            $('#streakWinToday').textContent = data.streaks.today.max_wins;
+            $('#streakLossToday').textContent = data.streaks.today.max_losses;
+            $('#streakWinWeek').textContent = data.streaks.week.max_wins;
+            $('#streakLossWeek').textContent = data.streaks.week.max_losses;
+            $('#streakWinMonth').textContent = data.streaks.month.max_wins;
+            $('#streakLossMonth').textContent = data.streaks.month.max_losses;
+        }
+
+        // Render Best Times
+        if (data.best_times) {
+            $('#bestTimesWeek').textContent = data.best_times.week;
+            $('#bestTimesMonth').textContent = data.best_times.month;
+        }
+
+        // Render Trend Chart
+        if (data.trend) {
+            updateTrendChart(data.trend);
+        }
+    } catch (e) {
+        console.error('Advanced stats fetch failed:', e);
+    }
+}
+
+function updateTrendChart(trendData) {
+    const labels = trendData.map(d => d.date);
+    const accData = trendData.map(d => d.accuracy);
+
+    if (!trendChart) {
+        const ctx = document.getElementById('trendChart').getContext('2d');
+        trendChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Daily Accuracy (%)',
+                    data: accData,
+                    borderColor: '#8b5cf6',
+                    backgroundColor: 'rgba(139, 92, 246, 0.1)',
+                    borderWidth: 2,
+                    pointBackgroundColor: '#8b5cf6',
+                    pointRadius: 4,
+                    pointHoverRadius: 6,
+                    fill: true,
+                    tension: 0.4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: { mode: 'index', intersect: false }
+                },
+                scales: {
+                    y: { 
+                        beginAtZero: true, 
+                        max: 100,
+                        grid: { color: 'rgba(255,255,255,0.05)' },
+                        ticks: { color: '#94a3b8', font: { family: 'JetBrains Mono' } }
+                    },
+                    x: { 
+                        grid: { display: false },
+                        ticks: { color: '#94a3b8', font: { family: 'JetBrains Mono' } }
+                    }
+                }
+            }
+        });
+    } else {
+        trendChart.data.labels = labels;
+        trendChart.data.datasets[0].data = accData;
+        trendChart.update();
+    }
+}
+
 /**
  * Derive CSS color class from a digit based on WinGo rules:
  *   Even (0,2,4,6,8) = 'red-num', Odd (1,3,5,7,9) = 'green-num'
@@ -543,7 +627,8 @@ document.addEventListener('DOMContentLoaded', () => {
     $('#btnReset').addEventListener('click', resetModel);
     $('#btnAutoPredict').addEventListener('click', toggleAutoPredict);
     $$('.timer-tab').forEach(tab => tab.addEventListener('click', () => switchTimer(tab.dataset.timer)));
-    fetchStats(); fetchPredictionHistory(); fetchFreshPrediction(activeTimer);
+    fetchStats(); fetchPredictionHistory(); fetchFreshPrediction(activeTimer); fetchAdvancedStats(activeTimer);
     checkPollerStatus();
     setInterval(checkPollerStatus, 30000);
+    setInterval(() => fetchAdvancedStats(activeTimer), 60000); // refresh advanced stats every minute
 });

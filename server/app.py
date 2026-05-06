@@ -22,7 +22,7 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.database import init_db, add_result, get_recent_results, get_all_results_ordered, \
     get_accuracy_stats, add_prediction, update_prediction_result, get_recent_predictions, \
-    get_result_count, get_timer_counts, extract_timer
+    get_result_count, get_timer_counts, extract_timer, get_advanced_stats
 from model.predictor import EnsemblePredictor
 from config import SEQUENCE_LENGTH, HOST, PORT
 from scraper.api_poller import WinGoPoller
@@ -425,6 +425,20 @@ async def reset_model(timer: str = Query(default="3min")):
         predictors[timer].initialize_lstm()
         return {"status": "model_reset", "timer": timer}
     return {"error": f"Unknown timer: {timer}"}
+
+
+@app.get("/api/timer_counts")
+async def api_timer_counts():
+    """Get count of results for each timer."""
+    counts = await get_timer_counts()
+    return counts
+
+
+@app.get("/api/advanced_stats")
+async def api_advanced_stats(timer: Optional[str] = None, tz_offset: int = -330):
+    """Get advanced stats (streaks, trends, best times)."""
+    stats = await get_advanced_stats(timer=timer, tz_offset_minutes=tz_offset)
+    return stats
 
 
 @app.get("/api/poller/status")

@@ -182,6 +182,63 @@
             </div>
         </section>
 
+        <!-- ============ ADVANCED ANALYTICS ROW ============ -->
+        <section class="advanced-section">
+            <div class="card-header">
+                <h2>Advanced Analytics</h2>
+                <span class="badge badge-color">Streaks & Trends</span>
+            </div>
+            
+            <div class="advanced-grid">
+                <!-- Streaks Column -->
+                <div class="streaks-col">
+                    <div class="streak-card">
+                        <div class="streak-header">Today</div>
+                        <div class="streak-stats">
+                            <div class="streak-win">Max Wins: <span id="streakWinToday">0</span></div>
+                            <div class="streak-loss">Max Losses: <span id="streakLossToday">0</span></div>
+                        </div>
+                    </div>
+                    <div class="streak-card">
+                        <div class="streak-header">This Week</div>
+                        <div class="streak-stats">
+                            <div class="streak-win">Max Wins: <span id="streakWinWeek">0</span></div>
+                            <div class="streak-loss">Max Losses: <span id="streakLossWeek">0</span></div>
+                        </div>
+                    </div>
+                    <div class="streak-card">
+                        <div class="streak-header">This Month</div>
+                        <div class="streak-stats">
+                            <div class="streak-win">Max Wins: <span id="streakWinMonth">0</span></div>
+                            <div class="streak-loss">Max Losses: <span id="streakLossMonth">0</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Best Times Column -->
+                <div class="best-times-card">
+                    <h3>Best Trading Hours</h3>
+                    <p class="best-times-desc">Hours where rolling 20 accuracy is >55%</p>
+                    <div class="best-time-row">
+                        <span class="time-label">This Week:</span>
+                        <span class="time-value" id="bestTimesWeek">Calculating...</span>
+                    </div>
+                    <div class="best-time-row">
+                        <span class="time-label">This Month:</span>
+                        <span class="time-value" id="bestTimesMonth">Calculating...</span>
+                    </div>
+                </div>
+
+                <!-- Trend Chart Column -->
+                <div class="trend-card">
+                    <h3>Daily Accuracy Trend (Last 10 Days)</h3>
+                    <div class="chart-container trend-container">
+                        <canvas id="trendChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </section>
+
         <!-- ============ MIDDLE ROW: RESULTS FEED + CHART ============ -->
         <section class="results-section">
             <div class="card-header">
