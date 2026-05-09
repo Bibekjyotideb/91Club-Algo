@@ -13,6 +13,12 @@ let activeTimer = '1min';
 let trendChart = null;
 
 let timerPredictions = { '30sec': null, '1min': null, '3min': null };
+// Most recent prediction meta — used by paper trader to honor should_skip
+let latestPredictionMeta = { should_skip: false, for_round: null, loss_streak: 0, timer: null };
+// Golden hours — raw sorted list of {hour, max_loss, acc} from advanced_stats
+let goldenHoursRaw = { week: [], month: [] };
+// Whether the paper trader is restricted to golden hours only
+let goldenHoursOnly = false;
 
 // ============ DOM REFS ============
 const $ = (sel) => document.querySelector(sel);
@@ -59,13 +65,17 @@ function handleMessage(msg) {
             if (statsTimer === activeTimer || statsTimer === 'all') onStats(msg.data);
             break;
         case 'history':
-            onHistory(msg.data);
             break;
         case 'timer_counts':
             updateTimerCounts(msg.data);
             break;
         case 'predictions_history':
-            renderPredictionHistory(msg.data || []);
+            if (msg.timer === activeTimer || !msg.timer) {
+                renderPredictionHistory(msg.data || []);
+            }
+            break;
+        case 'advanced_stats':
+            renderAdvancedStatsFromWS(msg.data);
             break;
         case 'bulk_complete':
             addLog(`[${msg.timer || '?'}] Bulk: ${msg.count} results.`);
@@ -81,16 +91,25 @@ function handleMessage(msg) {
 // ============ TIMER SWITCHING ============
 function switchTimer(timer) {
     if (timer === activeTimer) return;
+    
+    // Stop paper trader if they switch tabs to prevent cross-contamination of streaks
+    if (paperTrader && paperTrader.active) {
+        logPaperTrade(`[!] Timer switched to ${timer}. Stopping active trade to prevent data mixing.`, "#ef4444");
+        stopPaperTrade();
+    }
+    
     activeTimer = timer;
     $$('.timer-tab').forEach(tab => tab.classList.toggle('active', tab.dataset.timer === timer));
-    $('#resultsFeed').innerHTML = '<div class="empty-state"><p>Loading...</p></div>';
     chartLabels.length = 0; chartAccData.length = 0; chartRecentData.length = 0;
     if (accuracyChart) accuracyChart.update('none');
     if (timerPredictions[timer]) renderPrediction(timerPredictions[timer]);
     else clearAllPredictions();
-    if (ws && ws.readyState === WebSocket.OPEN)
-        ws.send(JSON.stringify({ type: 'switch_timer', timer }));
-    fetchStats(); fetchPredictionHistory(); fetchFreshPrediction(timer); fetchAdvancedStats(timer);
+    
+    // Send ONLY WebSocket message — server bundles stats, history, predictions, and advanced stats
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        const offset = new Date().getTimezoneOffset() * -1;
+        ws.send(JSON.stringify({ type: 'switch_timer', timer, tz_offset: offset }));
+    }
     addLog(`Switched to ${timer} timer`);
 }
 
@@ -150,34 +169,8 @@ function updateConnectionStatus(status) {
 
 // ============ RESULT HANDLING ============
 function onNewResult(data) {
-    addResultPill(data);
     resultCount++;
-    $('#resultCount').textContent = `${resultCount} results`;
     addLog(`Result: ${data.digit} (${data.label.toUpperCase()})${data.prediction_correct !== undefined ? (data.prediction_correct ? ' ✓' : ' ✗') : ''}`);
-}
-
-function addResultPill(data) {
-    const feed = $('#resultsFeed');
-    const empty = feed.querySelector('.empty-state'); if (empty) empty.remove();
-    const pill = document.createElement('div');
-    pill.className = `result-pill ${digitColorClass(data.digit)}`;
-    pill.textContent = data.digit;
-    pill.title = `Round: ${data.round_id || '?'}\nLabel: ${data.label}\nColor: ${data.color || '?'}\nTime: ${new Date(data.timestamp * 1000).toLocaleTimeString()}`;
-    feed.insertBefore(pill, feed.firstChild);
-    while (feed.children.length > 200) feed.removeChild(feed.lastChild);
-}
-
-function onHistory(data) {
-    const feed = $('#resultsFeed'); feed.innerHTML = '';
-    if (!data || data.length === 0) return;
-    resultCount = data.length;
-    $('#resultCount').textContent = `${resultCount} results`;
-    data.forEach(item => {
-        const pill = document.createElement('div');
-        pill.className = `result-pill ${digitColorClass(item.digit)}`;
-        pill.textContent = item.digit;
-        feed.appendChild(pill);
-    });
 }
 
 // ============ PREDICTION RENDERING ============
@@ -223,6 +216,47 @@ function renderSizePrediction(data) {
 
     const badge = $('#modelBadge');
     if (badge && data.timer) badge.textContent = `${data.timer} · Ensemble`;
+
+    // Confidence level badge
+    const confBadge = $('#confidenceBadge');
+    if (confBadge) {
+        const skip    = data.should_skip === true;
+        const flipped = data.flipped === true;
+        if (flipped) {
+            confBadge.textContent = '🔄 DIRECTION FLIPPED (stuck guard)';
+            confBadge.className = 'confidence-badge low';
+            confBadge.style.color = '#f59e0b';
+        } else if (skip) {
+            confBadge.textContent = '⚠ SKIP — LOW CONF / STREAK';
+            confBadge.className = 'confidence-badge low';
+            confBadge.style.color = '';
+        } else {
+            confBadge.textContent = '✓ OK TO BET';
+            confBadge.className = 'confidence-badge high';
+            confBadge.style.color = '';
+        }
+    }
+
+    // Cache should_skip + active prediction round so paper trader can honor it
+    latestPredictionMeta = {
+        should_skip: data.should_skip === true,
+        flipped: data.flipped === true,
+        for_round: data.for_round,
+        loss_streak: data.loss_streak || 0,
+        timer: data.timer
+    };
+
+    // Loss streak indicator
+    const streakEl = $('#lossStreakBadge');
+    if (streakEl) {
+        const streak = data.loss_streak || 0;
+        if (streak >= 2) {
+            streakEl.textContent = `🔥 ${streak} Loss Streak`;
+            streakEl.style.display = 'inline-block';
+        } else {
+            streakEl.style.display = 'none';
+        }
+    }
 
     addLog(`[${data.timer || '?'}] Size: ${data.prediction.toUpperCase()} (${confPct}%)`);
 }
@@ -294,7 +328,7 @@ function onStats(data) {
     $('#totalResults').textContent = data.total_results || 0;
     $('#totalPredictions').textContent = data.total_predictions || 0;
     updateAccuracyChart(data);
-    fetchPredictionHistory();
+    // NOTE: removed fetchPredictionHistory() call here — server sends it via WS bundle
 }
 
 async function fetchStats() {
@@ -354,32 +388,102 @@ async function fetchPredictionHistory() {
 // ============ ADVANCED STATS ============
 async function fetchAdvancedStats(timer) {
     try {
-        const offset = new Date().getTimezoneOffset() * -1; // sending minutes offset from UTC (e.g. +330 for IST)
+        const offset = new Date().getTimezoneOffset() * -1;
         const resp = await fetch(`/api/advanced_stats?timer=${timer}&tz_offset=${offset}`);
         const data = await resp.json();
-        
-        // Render Streaks
-        if (data.streaks) {
-            $('#streakWinToday').textContent = data.streaks.today.max_wins;
-            $('#streakLossToday').textContent = data.streaks.today.max_losses;
-            $('#streakWinWeek').textContent = data.streaks.week.max_wins;
-            $('#streakLossWeek').textContent = data.streaks.week.max_losses;
-            $('#streakWinMonth').textContent = data.streaks.month.max_wins;
-            $('#streakLossMonth').textContent = data.streaks.month.max_losses;
-        }
-
-        // Render Best Times
-        if (data.best_times) {
-            $('#bestTimesWeek').textContent = data.best_times.week;
-            $('#bestTimesMonth').textContent = data.best_times.month;
-        }
-
-        // Render Trend Chart
-        if (data.trend) {
-            updateTrendChart(data.trend);
-        }
+        renderAdvancedStatsFromWS(data);
     } catch (e) {
         console.error('Advanced stats fetch failed:', e);
+    }
+}
+
+// ============ GOLDEN HOURS FILTER ============
+function updateGoldenHoursFilter() {
+    goldenHoursOnly = $('#goldenHoursToggle').checked;
+
+    // Update visual state of the custom toggle
+    const slider = $('#goldenHoursSlider');
+    const knob = $('#goldenHoursKnob');
+    if (slider) slider.style.background = goldenHoursOnly ? 'rgba(245,158,11,0.6)' : '#334155';
+    if (knob) {
+        knob.style.background = goldenHoursOnly ? '#f59e0b' : '#94a3b8';
+        knob.style.left = goldenHoursOnly ? '18px' : '2px';
+    }
+
+    const statusEl = $('#goldenHoursStatus');
+    if (!statusEl) return;
+    if (!goldenHoursOnly) {
+        statusEl.style.display = 'none';
+        return;
+    }
+    statusEl.style.display = 'block';
+    const currentHour = new Date().getHours();
+    refreshGoldenHoursStatus(currentHour);
+}
+
+function refreshGoldenHoursStatus(currentHour) {
+    const statusEl = $('#goldenHoursStatus');
+    if (!statusEl || !goldenHoursOnly) return;
+
+    // Use month data (larger sample); fall back to week if month is empty
+    const src = goldenHoursRaw.month.length >= 3 ? goldenHoursRaw.month : goldenHoursRaw.week;
+    if (src.length === 0) {
+        statusEl.textContent = 'Loading golden hours data...';
+        statusEl.style.color = 'rgba(255,255,255,0.4)';
+        return;
+    }
+
+    // Top 8 safest hours (lowest max_loss, then highest acc)
+    const safeHours = src.slice(0, 8).map(h => h.hour);
+    const inGoldenHour = safeHours.includes(currentHour);
+
+    const formatHour = h => {
+        const ampm = h >= 12 ? 'PM' : 'AM';
+        const h12 = h % 12 || 12;
+        return `${h12}${ampm}`;
+    };
+
+    const safeLabels = src.slice(0, 8)
+        .map(h => `${formatHour(h.hour)}(L:${h.max_loss})`)
+        .join(' · ');
+
+    if (inGoldenHour) {
+        statusEl.innerHTML = `<span style="color:#10b981;">&#10003; ${formatHour(currentHour)}-${formatHour(currentHour+1)} is a golden hour</span><br>${safeLabels}`;
+    } else {
+        statusEl.innerHTML = `<span style="color:#ef4444;">&#9888; ${formatHour(currentHour)}-${formatHour(currentHour+1)} is NOT a golden hour — bets will be skipped</span><br>${safeLabels}`;
+    }
+}
+
+function renderAdvancedStatsFromWS(data) {
+    if (!data) return;
+
+    // Store raw golden hours for paper trader gating
+    if (data.safest_hours_raw) {
+        goldenHoursRaw.week  = data.safest_hours_raw.week  || [];
+        goldenHoursRaw.month = data.safest_hours_raw.month || [];
+        // Refresh the status display if filter is active
+        if (goldenHoursOnly) refreshGoldenHoursStatus(new Date().getHours());
+    }
+
+    // Render Streaks
+    if (data.streaks) {
+        $('#streakWinToday').textContent = data.streaks.today.max_wins;
+        $('#streakLossToday').textContent = data.streaks.today.max_losses;
+        $('#streakWinWeek').textContent = data.streaks.week.max_wins;
+        $('#streakLossWeek').textContent = data.streaks.week.max_losses;
+        $('#streakWinMonth').textContent = data.streaks.month.max_wins;
+        $('#streakLossMonth').textContent = data.streaks.month.max_losses;
+    }
+
+    // Render Golden Times
+    const oWeek = data.optimal_times?.week || 'No optimal hours detected';
+    const oMonth = data.optimal_times?.month || 'No optimal hours detected';
+    $('#optimalTimesWeek').innerHTML = oWeek;
+    $('#optimalTimesMonth').innerHTML = oMonth;
+
+    // Render Trend Chart
+    if (data.trend) {
+        updateTrendChart(data.trend);
     }
 }
 
@@ -467,6 +571,9 @@ function buildPredBadge(num, color, size) {
 }
 
 function renderPredictionHistory(predictions) {
+    // Pass to strategy calculator
+    trackLiveStreakFromHistory(predictions);
+
     // Desktop table
     const tbody = $('#historyBody'); tbody.innerHTML = '';
     // Mobile cards
@@ -515,35 +622,6 @@ function renderPredictionHistory(predictions) {
             cards.appendChild(card);
         }
     });
-}
-
-// ============ INPUT HANDLERS ============
-async function submitDigit(digit) {
-    try {
-        await fetch('/api/result', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ digit, source: 'manual', timer: activeTimer })
-        });
-    } catch (e) { addLog(`Error: ${e.message}`); }
-}
-
-async function submitBulk() {
-    const input = $('#bulkInput');
-    const digits = input.value.trim().split(/[\s,;]+/).map(Number).filter(d => d >= 0 && d <= 9);
-    if (!digits.length) { addLog('Invalid bulk input.'); return; }
-    addLog(`Submitting ${digits.length} results for ${activeTimer}...`);
-    $('#trainingStatus').style.display = 'flex';
-    try {
-        const resp = await fetch('/api/results/bulk', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ digits, timer: activeTimer })
-        });
-        const data = await resp.json();
-        input.value = '';
-        addLog(`Bulk complete: ${data.count} results.`);
-        $('#trainingStatus').style.display = 'none';
-        fetchStats(); location.reload();
-    } catch (e) { addLog(`Bulk error: ${e.message}`); $('#trainingStatus').style.display = 'none'; }
 }
 
 // ============ CONTROLS ============
@@ -615,13 +693,412 @@ function addLog(message) {
     while (box.children.length > 50) box.removeChild(box.lastChild);
 }
 
+// ============ RISK MANAGEMENT STRATEGY ============
+let strategyMode = 'capital';
+let currentActiveLossStreak = 0;
+
+function setStrategyMode(mode) {
+    strategyMode = mode;
+    const btnCapital = $('#modeCapital');
+    const btnBet = $('#modeBet');
+    
+    if (mode === 'capital') {
+        btnCapital.classList.add('active');
+        btnBet.classList.remove('active');
+        $('#primaryInputLabel').textContent = 'Total Capital (₹)';
+        $('#strategyInput').value = '1000';
+    } else {
+        btnBet.classList.add('active');
+        btnCapital.classList.remove('active');
+        $('#primaryInputLabel').textContent = 'Initial Base Bet (₹)';
+        $('#strategyInput').value = '10';
+    }
+    calculateStrategy();
+}
+
+function calculateMartingaleProgression(baseBet, levels, customMultiplier, payoutMultiplier = 1.96) {
+    let progression = [];
+    let totalLoss = 0;
+    let currentBet = baseBet;
+    
+    for (let i = 1; i <= levels; i++) {
+        if (i === 1) {
+            currentBet = baseBet;
+        } else {
+            // Use user-defined multiplier, e.g. 2.5x, 3x
+            currentBet = progression[progression.length - 1].bet * customMultiplier;
+            currentBet = Math.ceil(currentBet); // Round up to nearest integer
+        }
+        
+        const profitIfWin = (currentBet * payoutMultiplier) - (totalLoss + currentBet);
+        const totalRisk = totalLoss + currentBet;
+        
+        progression.push({
+            level: i,
+            bet: currentBet,
+            totalRisk: totalRisk,
+            profit: profitIfWin
+        });
+        
+        totalLoss += currentBet;
+    }
+    return progression;
+}
+
+function findOptimalBaseBet(totalCapital, levels, customMultiplier) {
+    // Binary search to find the highest base bet that keeps totalRisk <= totalCapital
+    let low = 0.01;
+    let high = totalCapital;
+    let bestBet = 0;
+    let maxIterations = 100;
+    
+    for (let i = 0; i < maxIterations; i++) {
+        let mid = (low + high) / 2;
+        let prog = calculateMartingaleProgression(mid, levels, customMultiplier);
+        let maxRisk = prog[prog.length - 1].totalRisk;
+        
+        if (maxRisk <= totalCapital) {
+            bestBet = mid;
+            low = mid; // Try going higher
+        } else {
+            high = mid; // Too expensive, go lower
+        }
+        
+        if (high - low < 0.01) break;
+    }
+    
+    // Round down to nearest integer for safety
+    return Math.floor(bestBet);
+}
+
+function calculateStrategy() {
+    const inputVal = parseFloat($('#strategyInput').value);
+    const levels = parseInt($('#strategyLevels').value);
+    let customMult = parseFloat($('#strategyMultiplier').value);
+    
+    if (isNaN(inputVal) || inputVal <= 0 || isNaN(levels) || levels <= 0) return;
+    if (isNaN(customMult) || customMult < 1.1) customMult = 2.08;
+    
+    let baseBet = 0;
+    let totalCap = 0;
+    let progression = [];
+    
+    if (strategyMode === 'capital') {
+        baseBet = findOptimalBaseBet(inputVal, levels, customMult);
+        progression = calculateMartingaleProgression(baseBet, levels, customMult);
+        totalCap = progression.length > 0 ? progression[progression.length - 1].totalRisk : 0;
+    } else {
+        baseBet = inputVal;
+        progression = calculateMartingaleProgression(baseBet, levels, customMult);
+        totalCap = progression.length > 0 ? progression[progression.length - 1].totalRisk : 0;
+    }
+    
+    // Update summary UI
+    $('#calcBaseBet').textContent = `₹${baseBet.toLocaleString()}`;
+    $('#calcTotalCap').textContent = `₹${totalCap.toLocaleString()}`;
+    
+    // Render Table
+    let tableHtml = '';
+    let hasLosses = false;
+    
+    progression.forEach(p => {
+        if (p.profit < 0) hasLosses = true;
+        
+        let profitColor = p.profit >= 0 ? "#10b981" : "#ef4444";
+        let profitSign = p.profit >= 0 ? "+" : "";
+        
+        tableHtml += `
+            <tr>
+                <td>Level ${p.level}</td>
+                <td style="color: #60a5fa">₹${p.bet.toLocaleString()}</td>
+                <td style="color: #ef4444">₹${p.totalRisk.toLocaleString()}</td>
+                <td style="color: ${profitColor}">${profitSign}₹${p.profit.toFixed(2)}</td>
+            </tr>
+        `;
+    });
+    
+    // Warn if capital mode can't even afford 1 base bet
+    if (strategyMode === 'capital' && baseBet < 1) {
+        $('#calcBaseBet').textContent = "Not Enough Capital";
+        $('#calcBaseBet').style.color = "#ef4444";
+        $('#progressionTableBody').innerHTML = `<tr><td colspan="4" style="text-align:center;color:#ef4444">Increase capital or decrease levels to afford at least a ₹1 base bet.</td></tr>`;
+        return;
+    } else if (hasLosses) {
+        $('#calcBaseBet').style.color = "#f59e0b"; // warning color
+        $('#progressionTableBody').innerHTML = `<tr><td colspan="4" style="text-align:center;background:rgba(239, 68, 68, 0.1);color:#ef4444;font-weight:bold;padding:10px;">WARNING: Multiplier is too low! You will lose money even if you win at higher levels. (Requires at least 2.05x)</td></tr>` + tableHtml;
+    } else {
+        $('#calcBaseBet').style.color = "#10b981";
+        $('#progressionTableBody').innerHTML = tableHtml;
+    }
+}
+
+function updateLiveAlert() {
+    const waitStreak = parseInt($('#strategyWait').value) || 0;
+    const levels = parseInt($('#strategyLevels').value) || 7;
+    const box = $('#liveAlertBox');
+    const status = $('#alertStatus');
+    const msg = $('#alertMessage');
+    
+    // Icons
+    const iconWait = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`;
+    const iconEnter = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>`;
+    const iconAlert = `<svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`;
+    
+    // We need the current progression array to fetch bet amounts
+    // (calculateStrategy() builds this table, but we can quickly rebuild it here to get the exact amount)
+    let customMult = parseFloat($('#strategyMultiplier').value);
+    if (isNaN(customMult) || customMult < 1.1) customMult = 2.08;
+    const baseBetText = $('#calcBaseBet').textContent.replace(/[^0-9.-]+/g, "");
+    const baseBet = parseFloat(baseBetText) || 10;
+    const prog = calculateMartingaleProgression(baseBet, levels, customMult);
+    
+    if (currentActiveLossStreak >= waitStreak && waitStreak >= 0) {
+        // We are IN the market
+        const currentLevelIndex = currentActiveLossStreak - waitStreak; // 0-indexed (0 = Level 1)
+        const currentLevel = currentLevelIndex + 1;
+        
+        if (currentLevel <= levels) {
+            // Active sequence! Tell them exactly what to bet
+            const exactBet = prog[currentLevelIndex] ? prog[currentLevelIndex].bet : 0;
+            box.className = 'alert-box enter';
+            status.textContent = `ACTIVE: PLACE LEVEL ${currentLevel} BET`;
+            msg.textContent = `AI Loss Streak: ${currentActiveLossStreak}. You are on Level ${currentLevel} of your strategy. Place a bet of ₹${exactBet.toLocaleString()} now.`;
+            $('#alertIcon').innerHTML = iconEnter;
+        } else {
+            // Oh no, the streak exceeded their max levels!
+            box.className = 'alert-box waiting';
+            box.style.border = "1px solid #ef4444";
+            box.style.background = "rgba(239, 68, 68, 0.1)";
+            status.textContent = 'MAX LEVELS EXCEEDED';
+            status.style.color = '#ef4444';
+            msg.textContent = `AI Loss Streak: ${currentActiveLossStreak}. You have exceeded your ${levels} safe levels. Wait for a win to reset.`;
+            $('#alertIcon').innerHTML = iconAlert;
+            $('#alertIcon').style.color = "#ef4444";
+        }
+    } else {
+        // We are WAITING
+        box.className = 'alert-box waiting';
+        box.style.border = "";
+        box.style.background = "";
+        status.textContent = 'WAITING...';
+        status.style.color = '';
+        msg.textContent = `AI is currently on a ${currentActiveLossStreak}-loss streak. Wait for ${waitStreak} before entering.`;
+        $('#alertIcon').innerHTML = iconWait;
+        $('#alertIcon').style.color = '';
+    }
+}
+
+// Track Live Streaks from websocket updates
+function trackLiveStreakFromHistory(historyArray) {
+    if (!historyArray || historyArray.length === 0) return;
+    
+    let streak = 0;
+    for (let i = 0; i < historyArray.length; i++) {
+        // Skip pending rounds that haven't resulted yet
+        if (historyArray[i].correct === null || historyArray[i].correct === undefined) {
+            continue;
+        }
+        if (historyArray[i].correct === 0) {
+            streak++;
+        } else {
+            break;
+        }
+    }
+    currentActiveLossStreak = streak;
+    updateLiveAlert();
+    processPaperTrade(historyArray);
+}
+
+// ============ STRATEGY PERSISTENCE ============
+function saveStrategySettings() {
+    const settings = {
+        mode: strategyMode,
+        input: $('#strategyInput').value,
+        levels: $('#strategyLevels').value,
+        multiplier: $('#strategyMultiplier').value,
+        wait: $('#strategyWait').value
+    };
+    localStorage.setItem('riskStrategy', JSON.stringify(settings));
+    
+    const toast = $('#saveToast');
+    toast.style.opacity = 1;
+    setTimeout(() => { toast.style.opacity = 0; }, 2000);
+}
+
+function loadStrategySettings() {
+    try {
+        const saved = localStorage.getItem('riskStrategy');
+        if (saved) {
+            const settings = JSON.parse(saved);
+            $('#strategyInput').value = settings.input;
+            $('#strategyLevels').value = settings.levels;
+            $('#strategyMultiplier').value = settings.multiplier || 2.08;
+            $('#strategyWait').value = settings.wait;
+            setStrategyMode(settings.mode || 'capital');
+        }
+    } catch (e) {
+        console.error("Failed to load saved strategy");
+    }
+}
+
+// ============ PAPER TRADING ENGINE ============
+let paperTrader = {
+    active: false,
+    balance: 0,
+    lastProcessedRound: null,
+    currentBetLevel: -1, // -1 means waiting
+    waitStreakTarget: 0,
+    maxLevels: 0,
+    multiplier: 2.08,
+    baseBet: 10,
+    progression: []
+};
+
+function togglePaperTrade() {
+    if (paperTrader.active) return;
+    
+    const capital = parseFloat($('#strategyInput').value);
+    if (isNaN(capital) || capital <= 0) {
+        alert("Please set a valid Total Capital before starting.");
+        return;
+    }
+    
+    paperTrader.active = true;
+    paperTrader.balance = capital;
+    paperTrader.waitStreakTarget = parseInt($('#strategyWait').value) || 0;
+    paperTrader.maxLevels = parseInt($('#strategyLevels').value) || 7;
+    paperTrader.multiplier = parseFloat($('#strategyMultiplier').value) || 2.08;
+    
+    const baseBetText = $('#calcBaseBet').textContent.replace(/[^0-9.-]+/g, "");
+    paperTrader.baseBet = parseFloat(baseBetText) || 10;
+    
+    if (paperTrader.baseBet < 1) {
+        alert("Base bet must be at least ₹1. Adjust your settings.");
+        paperTrader.active = false;
+        return;
+    }
+    
+    paperTrader.progression = calculateMartingaleProgression(paperTrader.baseBet, paperTrader.maxLevels, paperTrader.multiplier);
+    paperTrader.currentBetLevel = -1; // Waiting
+    paperTrader.lastProcessedRound = null;
+    
+    $('#paperStatusBadge').textContent = 'RUNNING';
+    $('#paperStatusBadge').style.background = 'rgba(16, 185, 129, 0.2)';
+    $('#paperStatusBadge').style.color = '#10b981';
+    
+    $('#paperLogBox').innerHTML = `<div style="color: #10b981; margin-bottom: 5px;">[SYSTEM] Engine Started. Bankroll: ₹${capital.toLocaleString()}</div>`;
+    updatePaperUI();
+}
+
+function stopPaperTrade() {
+    if (!paperTrader.active) return;
+    paperTrader.active = false;
+    $('#paperStatusBadge').textContent = 'STOPPED';
+    $('#paperStatusBadge').style.background = 'rgba(239, 68, 68, 0.2)';
+    $('#paperStatusBadge').style.color = '#ef4444';
+    logPaperTrade(`[SYSTEM] Engine Stopped. Final Bankroll: ₹${paperTrader.balance.toLocaleString()}`, "#ef4444");
+}
+
+function updatePaperUI() {
+    $('#paperBalance').textContent = `₹${paperTrader.balance.toFixed(2)}`;
+}
+
+function logPaperTrade(msg, color="#94a3b8") {
+    const box = $('#paperLogBox');
+    const div = document.createElement('div');
+    div.style.color = color;
+    div.style.marginBottom = '4px';
+    div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+}
+
+function processPaperTrade(historyArray) {
+    if (!paperTrader.active) return;
+    
+    const resolved = historyArray.filter(h => h.correct !== null && h.correct !== undefined);
+    if (resolved.length === 0) return;
+    const latest = resolved[0];
+    
+    if (latest.round_id === paperTrader.lastProcessedRound) return; // No new data
+    
+    if (paperTrader.currentBetLevel !== -1) {
+        const betAmount = paperTrader.progression[paperTrader.currentBetLevel].bet;
+        
+        if (latest.correct === 1) {
+            const payout = betAmount * 1.96;
+            paperTrader.balance += payout;
+            logPaperTrade(`WON Level ${paperTrader.currentBetLevel + 1}! (+₹${payout.toFixed(2)})`, "#10b981");
+            paperTrader.currentBetLevel = -1;
+        } else {
+            logPaperTrade(`LOST Level ${paperTrader.currentBetLevel + 1}.`, "#ef4444");
+            paperTrader.currentBetLevel++;
+            
+            if (paperTrader.currentBetLevel >= paperTrader.maxLevels) {
+                logPaperTrade(`CRITICAL: Max Levels Exceeded. Sequence Wiped.`, "#ef4444");
+                paperTrader.currentBetLevel = -1; // Wait for win to reset
+            }
+        }
+    }
+    
+    let newStreak = 0;
+    for (let i = 0; i < resolved.length; i++) {
+        if (resolved[i].correct === 0) newStreak++;
+        else break;
+    }
+    
+    if (paperTrader.currentBetLevel === -1) {
+        if (newStreak >= paperTrader.waitStreakTarget && paperTrader.waitStreakTarget >= 0) {
+            paperTrader.currentBetLevel = newStreak - paperTrader.waitStreakTarget; 
+            if (paperTrader.currentBetLevel >= paperTrader.maxLevels) {
+                paperTrader.currentBetLevel = -1;
+            }
+        }
+    }
+    
+    if (paperTrader.currentBetLevel !== -1) {
+        // ── Golden Hours gate ──────────────────────────────────────────────
+        if (goldenHoursOnly) {
+            const currentHour = new Date().getHours();
+            const src = goldenHoursRaw.month.length >= 3
+                ? goldenHoursRaw.month : goldenHoursRaw.week;
+            const safeHours = src.slice(0, 8).map(h => h.hour);
+            if (safeHours.length > 0 && !safeHours.includes(currentHour)) {
+                const fmt = h => `${h % 12 || 12}${h >= 12 ? 'PM' : 'AM'}`;
+                logPaperTrade(
+                    `SKIPPED (${fmt(currentHour)} not a golden hour — max loss too high)`,
+                    "#f59e0b"
+                );
+                paperTrader.lastProcessedRound = latest.round_id;
+                updatePaperUI();
+                return;
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────
+
+        const nextBet = paperTrader.progression[paperTrader.currentBetLevel].bet;
+        if (paperTrader.balance < nextBet) {
+            logPaperTrade(`BANKRUPT! Insufficient funds for Level ${paperTrader.currentBetLevel + 1} (₹${nextBet}).`, "#ef4444");
+            stopPaperTrade();
+            return;
+        }
+        paperTrader.balance -= nextBet;
+        let betNote = '';
+        if (latestPredictionMeta && latestPredictionMeta.timer === activeTimer) {
+            if (latestPredictionMeta.flipped)    betNote = ' 🔄 direction flipped';
+            else if (latestPredictionMeta.should_skip) betNote = ' \u26a0 AI flagged SKIP';
+        }
+        logPaperTrade(`PLACED Level ${paperTrader.currentBetLevel + 1} Bet: -\u20b9${nextBet.toLocaleString()}${betNote}`, "#60a5fa");
+    }
+    
+    paperTrader.lastProcessedRound = latest.round_id;
+    updatePaperUI();
+}
+
 // ============ INIT ============
 document.addEventListener('DOMContentLoaded', () => {
     initChart();
     connectWebSocket();
-    $$('.digit-btn').forEach(btn => btn.addEventListener('click', () => submitDigit(parseInt(btn.dataset.digit))));
-    $('#bulkSubmit').addEventListener('click', submitBulk);
-    $('#bulkInput').addEventListener('keypress', (e) => { if (e.key === 'Enter') submitBulk(); });
     $('#btnTrain').addEventListener('click', triggerTrain);
     $('#btnPredict').addEventListener('click', triggerPredict);
     $('#btnReset').addEventListener('click', resetModel);
@@ -631,4 +1108,10 @@ document.addEventListener('DOMContentLoaded', () => {
     checkPollerStatus();
     setInterval(checkPollerStatus, 30000);
     setInterval(() => fetchAdvancedStats(activeTimer), 60000); // refresh advanced stats every minute
+    setInterval(() => refreshGoldenHoursStatus(new Date().getHours()), 60000); // re-check hour
+    
+    // Initialize Strategy Engine
+    loadStrategySettings();
+    calculateStrategy();
+    updateLiveAlert();
 });

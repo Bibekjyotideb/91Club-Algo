@@ -18,14 +18,27 @@ HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8000"))
 
 # --- Model Hyperparameters ---
+# Defaults match the saved checkpoints (128/2).  To use a smaller VPS model
+# set these in .env AND delete model/checkpoints/*.pt before restarting:
+#   HIDDEN_SIZE=64  NUM_LAYERS=1  SEQUENCE_LENGTH=20
 SEQUENCE_LENGTH = int(os.getenv("SEQUENCE_LENGTH", "30"))     # sliding window size
-HIDDEN_SIZE = 128                                              # LSTM hidden units
-NUM_LAYERS = 2                                                 # LSTM layers
+HIDDEN_SIZE     = int(os.getenv("HIDDEN_SIZE",     "128"))    # LSTM hidden units
+NUM_LAYERS      = int(os.getenv("NUM_LAYERS",      "2"))      # LSTM layers
 DROPOUT = 0.3
 LEARNING_RATE = float(os.getenv("LEARNING_RATE", "0.001"))
-BATCH_SIZE = 32
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "64"))               # larger batch = fewer gradient steps
 EPOCHS_INITIAL = 100                                           # for initial bulk training
 ONLINE_LR = 0.0005                                            # lower LR for online updates
+
+# --- VPS / CPU throttling ---
+# Number of PyTorch intra-op threads.  1-2 is best on a shared-core VPS
+# (avoids thread contention and memory spikes during training).
+TORCH_THREADS    = int(os.getenv("TORCH_THREADS",    "1"))
+# Epochs used at server startup (checkpoint is already well-trained; just warm-up).
+STARTUP_EPOCHS   = int(os.getenv("STARTUP_EPOCHS",   "3"))
+# Epochs and interval for the background continuous trainer.
+CONTINUOUS_EPOCHS    = int(os.getenv("CONTINUOUS_EPOCHS",    "5"))
+CONTINUOUS_INTERVAL  = int(os.getenv("CONTINUOUS_INTERVAL",  "3600"))  # seconds (default 60 min)
 
 # --- Prediction ---
 CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.55"))

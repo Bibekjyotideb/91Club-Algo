@@ -10,8 +10,11 @@ import time
 import json
 import hashlib
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Optional
+
+import torch
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request, Cookie
 from fastapi.staticfiles import StaticFiles
@@ -22,9 +25,12 @@ from pydantic import BaseModel
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from data.database import init_db, add_result, get_recent_results, get_all_results_ordered, \
     get_accuracy_stats, add_prediction, update_prediction_result, get_recent_predictions, \
-    get_result_count, get_timer_counts, extract_timer, get_advanced_stats
+    get_result_count, get_timer_counts, extract_timer, get_advanced_stats, close_db
 from model.predictor import EnsemblePredictor
-from config import SEQUENCE_LENGTH, HOST, PORT
+from config import (
+    SEQUENCE_LENGTH, HOST, PORT,
+    TORCH_THREADS, STARTUP_EPOCHS, CONTINUOUS_EPOCHS, CONTINUOUS_INTERVAL,
+)
 from scraper.api_poller import WinGoPoller
 
 # --- Global State ---
@@ -38,6 +44,11 @@ training_in_progress = False
 auto_predict = True
 poller_instance: Optional[WinGoPoller] = None
 poller_status = {"active": False, "captured": {}}
+
+# Advanced stats cache (60s TTL per timer)
+_adv_stats_cache: dict[str, dict] = {}
+_adv_stats_ts: dict[str, float] = {}
+ADV_STATS_TTL = 60  # seconds
 
 # --- Auth ---
 AUTH_USERNAME = os.getenv("DASHBOARD_USER", "Bibekjyoti")
@@ -75,13 +86,20 @@ async def on_api_result(digit: int, round_id: str, color: str, timer: str):
         result["prediction_correct"] = correct
         pending_prediction_ids[timer] = None
 
+    # Record outcome for streak tracking and live weight adjustment
+    if timer in predictors:
+        predictors[timer].record_outcome(result["label"])
+
     # Online model update for this timer only
     results = await get_all_results_ordered(timer=timer)
     digits = [r["digit"] for r in results]
     timestamps = [r["timestamp"] for r in results]
 
     if timer in predictors:
-        predictors[timer].online_update(digits, timestamps=timestamps)
+        asyncio.create_task(_run_train(
+            lambda d=digits, ts=timestamps, t=timer:
+                predictors[t].online_update(d, timestamps=ts)
+        ))
 
     # Broadcast new result
     await broadcast({
@@ -97,30 +115,60 @@ async def on_api_result(digit: int, round_id: str, color: str, timer: str):
     stats = await get_accuracy_stats(timer=timer)
     await broadcast({"type": "stats", "data": stats})
 
+    # Broadcast updated prediction history so Win/Miss table refreshes in real-time
+    preds = await get_recent_predictions(30, timer=timer)
+    await broadcast({"type": "predictions_history", "data": preds, "timer": timer})
+
     # Update poller status
     poller_status["captured"][timer] = poller_status["captured"].get(timer, 0) + 1
+
+
+# --- Thread pool for CPU-heavy training (keeps event loop responsive) ---
+_train_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="trainer")
+
+
+async def _run_train(fn):
+    """Run a blocking training function in the background thread pool."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_train_executor, fn)
 
 
 # --- Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global poller_instance
+
+    # Limit PyTorch to TORCH_THREADS intra-op threads — prevents CPU thrashing
+    # on shared-core VPS (e2-micro).  Set TORCH_THREADS=2 in .env for a 2-vCPU box.
+    torch.set_num_threads(TORCH_THREADS)
+    torch.set_num_interop_threads(1)
+    print(f"[STARTUP] PyTorch threads: intra={TORCH_THREADS}, interop=1")
+
     await init_db()
 
     # Initialize a separate model per timer
     for timer in TIMERS:
         predictors[timer] = EnsemblePredictor(timer_name=timer)
-        predictors[timer].initialize_lstm()
+        predictors[timer].initialize_lstm()   # loads saved checkpoint if present
         pending_prediction_ids[timer] = None
         latest_predictions[timer] = {}
 
-        # Train on existing data for this timer
-        results = await get_all_results_ordered(timer=timer)
-        if len(results) >= SEQUENCE_LENGTH + 5:
-            digits = [r["digit"] for r in results]
+    # Kick off startup fine-tuning in the background so the server is immediately
+    # responsive.  STARTUP_EPOCHS is small (default 3) — checkpoint is already trained.
+    async def _startup_train():
+        for timer in TIMERS:
+            results = await get_all_results_ordered(timer=timer)
+            if len(results) < SEQUENCE_LENGTH + 5:
+                continue
+            digits     = [r["digit"]     for r in results]
             timestamps = [r["timestamp"] for r in results]
-            print(f"[STARTUP] Training {timer} model on {len(digits)} results...")
-            predictors[timer].train_bulk(digits, epochs=15, lr=0.001, timestamps=timestamps)
+            print(f"[STARTUP] Fine-tuning {timer} ({len(digits)} rows, {STARTUP_EPOCHS} epochs) ...")
+            await _run_train(lambda d=digits, ts=timestamps, t=timer:
+                predictors[t].train_bulk(d, epochs=STARTUP_EPOCHS, lr=0.001, timestamps=ts)
+            )
+            print(f"[STARTUP] {timer} fine-tune complete.")
+
+    asyncio.create_task(_startup_train())
 
     # Start background trainer
     asyncio.create_task(continuous_trainer())
@@ -143,6 +191,8 @@ async def lifespan(app: FastAPI):
 
     for timer in TIMERS:
         predictors[timer].save()
+
+    await close_db()
 
 
 app = FastAPI(title="Win Go Predictor", lifespan=lifespan)
@@ -196,19 +246,26 @@ async def broadcast(message: dict):
 
 # --- Background Tasks ---
 async def continuous_trainer():
-    """Periodically retrain each timer's model on its own data."""
+    """Periodically retrain each timer's model in the background thread pool.
+
+    Runs every CONTINUOUS_INTERVAL seconds (default 3600 = 60 min).
+    Training is offloaded via _run_train so the event loop stays responsive.
+    """
     global training_in_progress
     while True:
-        await asyncio.sleep(1800)  # every 30 minutes (gentle on low-power servers)
+        await asyncio.sleep(CONTINUOUS_INTERVAL)
         try:
             for timer in TIMERS:
                 count = await get_result_count(timer=timer)
                 if count >= SEQUENCE_LENGTH + 10 and not training_in_progress:
                     training_in_progress = True
                     results = await get_all_results_ordered(timer=timer)
-                    digits = [r["digit"] for r in results]
+                    digits     = [r["digit"]     for r in results]
                     timestamps = [r["timestamp"] for r in results]
-                    result = predictors[timer].train_bulk(digits, epochs=10, lr=0.0005, timestamps=timestamps)
+                    result = await _run_train(
+                        lambda d=digits, ts=timestamps, t=timer:
+                            predictors[t].train_bulk(d, epochs=CONTINUOUS_EPOCHS, lr=0.0005, timestamps=ts)
+                    )
                     print(f"[TRAINER] {timer} retrained: {result}")
                     training_in_progress = False
                     await broadcast({"type": "training_complete", "timer": timer, "result": result})
@@ -285,13 +342,20 @@ async def submit_result(result_input: ResultInput):
         result["prediction_correct"] = correct
         pending_prediction_ids[timer] = None
 
+    # Record outcome for streak tracking and live weight adjustment
+    if timer in predictors:
+        predictors[timer].record_outcome(result["label"])
+
     # Online model update for this timer only
     results = await get_all_results_ordered(timer=timer)
     digits = [r["digit"] for r in results]
     timestamps = [r["timestamp"] for r in results]
 
     if timer in predictors:
-        predictors[timer].online_update(digits, timestamps=timestamps)
+        asyncio.create_task(_run_train(
+            lambda d=digits, ts=timestamps, t=timer:
+                predictors[t].online_update(d, timestamps=ts)
+        ))
 
     # Broadcast new result
     await broadcast({
@@ -403,7 +467,10 @@ async def trigger_training(timer: str = Query(default="3min")):
 
     training_in_progress = True
     timestamps = [r["timestamp"] for r in results]
-    result = predictors[timer].train_bulk(digits, epochs=100, lr=0.001, timestamps=timestamps)
+    result = await _run_train(
+        lambda d=digits, ts=timestamps, t=timer:
+            predictors[t].train_bulk(d, epochs=CONTINUOUS_EPOCHS * 4, lr=0.001, timestamps=ts)
+    )
     training_in_progress = False
 
     await broadcast({"type": "training_complete", "timer": timer, "result": result})
@@ -434,11 +501,22 @@ async def api_timer_counts():
     return counts
 
 
+async def get_cached_advanced_stats(timer: str, tz_offset: int = -330) -> dict:
+    """Get advanced stats with 60s caching per timer."""
+    cache_key = f"{timer}_{tz_offset}"
+    now = time.time()
+    if cache_key in _adv_stats_cache and (now - _adv_stats_ts.get(cache_key, 0)) < ADV_STATS_TTL:
+        return _adv_stats_cache[cache_key]
+    stats = await get_advanced_stats(timer=timer, tz_offset_minutes=tz_offset)
+    _adv_stats_cache[cache_key] = stats
+    _adv_stats_ts[cache_key] = now
+    return stats
+
+
 @app.get("/api/advanced_stats")
 async def api_advanced_stats(timer: Optional[str] = None, tz_offset: int = -330):
     """Get advanced stats (streaks, trends, best times)."""
-    stats = await get_advanced_stats(timer=timer, tz_offset_minutes=tz_offset)
-    return stats
+    return await get_cached_advanced_stats(timer or '1min', tz_offset)
 
 
 @app.get("/api/poller/status")
@@ -467,9 +545,6 @@ async def websocket_endpoint(websocket: WebSocket):
         timer_counts = await get_timer_counts()
         await websocket.send_json({"type": "timer_counts", "data": timer_counts})
 
-        recent = await get_recent_results(30)
-        await websocket.send_json({"type": "history", "data": recent})
-
         # Send latest predictions for all timers
         for timer, pred in latest_predictions.items():
             if pred:
@@ -484,22 +559,28 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_json({"type": "pong"})
 
             elif msg.get("type") == "switch_timer":
-                # Client wants data for a specific timer
+                # Client wants data for a specific timer — send fast data first
                 req_timer = msg.get("timer", "3min")
+
+                # 1. Stats (fast DB query)
                 stats = await get_accuracy_stats(timer=req_timer)
                 await websocket.send_json({"type": "stats", "data": stats})
 
-                recent = await get_recent_results(30, timer=req_timer)
-                await websocket.send_json({"type": "history", "data": recent})
-
-                preds = await get_recent_predictions(30, timer=req_timer)
-                await websocket.send_json({"type": "predictions_history", "data": preds})
-
-                # Send cached prediction, or generate one on-the-fly
+                # 2. Cached prediction FIRST — updates prediction cards immediately
                 if latest_predictions.get(req_timer):
                     await websocket.send_json({"type": "prediction", "data": latest_predictions[req_timer]})
-                elif req_timer in predictors:
-                    # No cached prediction — generate fresh
+
+                # 3. Prediction history table
+                preds = await get_recent_predictions(30, timer=req_timer)
+                await websocket.send_json({"type": "predictions_history", "data": preds, "timer": req_timer})
+
+                # 4. Advanced stats (cached 60s — potentially slow on cache miss)
+                tz_off = msg.get("tz_offset", -330)
+                adv = await get_cached_advanced_stats(req_timer, tz_off)
+                await websocket.send_json({"type": "advanced_stats", "data": adv})
+
+                # 5. On-the-fly prediction only if nothing was cached
+                if not latest_predictions.get(req_timer) and req_timer in predictors:
                     results = await get_all_results_ordered(timer=req_timer)
                     if len(results) >= 5:
                         digits = [r["digit"] for r in results]

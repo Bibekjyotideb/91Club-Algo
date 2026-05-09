@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from typing import Optional
+from collections import deque
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -79,6 +80,13 @@ class EnsemblePredictor:
         self.model_correct = {"lstm": 0, "markov": 0, "pattern": 0, "frequency": 0}
         self.model_total = {"lstm": 0, "markov": 0, "pattern": 0, "frequency": 0}
 
+        # Streak tracking and live weight adjustment
+        self.recent_outcomes = deque(maxlen=30)  # True/False for ensemble correctness
+        self._pending_prediction = None  # stores per-model predictions for outcome tracking
+
+        # Track recently predicted digits to enforce variety in number predictions.
+        self._last_digit_predictions: deque = deque(maxlen=8)
+
         self._initialized = False
 
     def initialize_lstm(self):
@@ -95,6 +103,12 @@ class EnsemblePredictor:
                 self.weights = checkpoint.get("ensemble_weights", self.weights)
                 self.model_correct = checkpoint.get("model_correct", self.model_correct)
                 self.model_total = checkpoint.get("model_total", self.model_total)
+                # Restore streak history if available
+                saved_outcomes = checkpoint.get("recent_outcomes", [])
+                self.recent_outcomes = deque(saved_outcomes, maxlen=30)
+                # Restore digit diversity history
+                saved_digits = checkpoint.get("last_digit_predictions", [])
+                self._last_digit_predictions = deque(saved_digits, maxlen=8)
                 print(f"[MODEL] [{self.timer_name}] Loaded saved model from {model_path}")
             except Exception as e:
                 print(f"[MODEL] [{self.timer_name}] Could not load saved model: {e}")
@@ -192,13 +206,18 @@ class EnsemblePredictor:
 
     def online_update(self, digits: list[int], lr: float = 0.0005,
                       timestamps: list[float] = None):
-        """Update the model with the latest data point (online learning)."""
+        """Update the model with the latest data point (online learning).
+        Skips LSTM updates during loss streaks to prevent noise-chasing."""
         if not self._initialized or len(digits) < SEQUENCE_LENGTH + 1:
             return
 
-        # Update Markov chain
+        # Update Markov chain (always — it's stateless and cheap)
         labels = [1 if d >= 5 else 0 for d in digits]
         self.markov.train(labels)
+
+        # Freeze LSTM during 3+ loss streaks to prevent chasing noise
+        if self._get_loss_streak() >= 3:
+            return
 
         # Quick LSTM update on recent data
         n = SEQUENCE_LENGTH + 10
@@ -293,19 +312,55 @@ class EnsemblePredictor:
         else:
             ensemble_prob = 0.5
 
-        # ===== NUMBER PREDICTION (0-9) — the CORE prediction =====
+        # Loss streak (used for skip / confidence gating below)
+        loss_streak = self._get_loss_streak()
+
+        # --- Streak-aware confidence reduction ---
+        # During a loss streak, nudge ensemble_prob toward 0.5 (never past it).
+        # This DOES NOT flip the prediction direction — it only lowers confidence
+        # so the HIGH-confidence gate skips those rounds, protecting bankroll.
+        if loss_streak >= 3:
+            contrarian_strength = min(0.10 + (loss_streak - 3) * 0.06, 0.22)
+            if ensemble_prob > 0.5:
+                ensemble_prob = max(ensemble_prob - contrarian_strength, 0.50)
+            else:
+                ensemble_prob = min(ensemble_prob + contrarian_strength, 0.50)
+
+        # Store pending prediction for outcome tracking
+        self._pending_prediction = {
+            "ensemble_big": ensemble_prob >= 0.5,
+            "models": {name: pred["prob_big"] >= 0.5 for name, pred in model_predictions.items()}
+        }
+
+        # ===== SIZE PREDICTION — directly from ensemble (primary, most reliable) =====
+        # Number and color are derived FROM the size decision, never the reverse.
+        # Deriving size from predicted_digit was a bug: the diversity penalty inside
+        # _predict_number could push argmax to the wrong side, silently inverting size.
+        size_pred = "big" if ensemble_prob >= 0.5 else "small"
+        size_conf = abs(ensemble_prob - 0.5) * 2
+
+        # ===== NUMBER PREDICTION (0-9) — informational, constrained to correct side =====
         number_pred = self._predict_number(digits, ensemble_prob_big=ensemble_prob)
         predicted_digit = number_pred["predicted"]
         probs = number_pred["probabilities"]  # 10 probabilities
+        prob_big_from_num = float(sum(probs[5:10]))  # used for probability display bars
 
-        # ===== DERIVE SIZE deterministically from the predicted number =====
-        # 0-4 = Small, 5-9 = Big — MUST match the predicted digit
-        size_pred = "big" if predicted_digit >= 5 else "small"
-        # Confidence: how much probability mass is on the correct side
-        prob_big_from_num = float(sum(probs[5:10]))
-        size_conf = prob_big_from_num if predicted_digit >= 5 else (1.0 - prob_big_from_num)
-        # Normalize confidence to 0-1 range (0.5 = no confidence, 1.0 = full confidence)
-        size_conf = abs(size_conf - 0.5) * 2
+        # ===== CONFIDENCE GATING =====
+        # Backtests on 8900+ rounds confirm all sub-models sit within ±2pp of 50%
+        # → ensemble-distance and model-agreement are pure noise on random data.
+        # Using them to gate "HIGH" confidence was actively harmful (backtest showed
+        # HIGH-conf rounds at 45.8% — worse than flipping a coin).
+        #
+        # Real risk control: only skip on loss streaks ≥ 4 (bankroll protection).
+        # Model-agreement is still computed for informational display bars.
+        ensemble_big = ensemble_prob >= 0.5
+        agree_count = sum(
+            1 for p in model_predictions.values()
+            if (p["prob_big"] >= 0.5) == ensemble_big
+        )
+        # Always "HIGH" unless on a damaging loss streak
+        confidence_level = "HIGH" if loss_streak < 4 else "LOW"
+        should_skip = loss_streak >= 4
 
         # ===== DERIVE COLOR deterministically from the predicted number =====
         # Even (incl 0) = Red, Odd = Green, 0 & 5 = also Violet
@@ -318,6 +373,11 @@ class EnsemblePredictor:
             "models": model_predictions,
             "number": number_pred,
             "color": color_pred,
+            "confidence_level": confidence_level,
+            "loss_streak": loss_streak,
+            "should_skip": should_skip,
+            "flipped": False,
+            "model_agreement": agree_count,
         }
 
     def _predict_number(self, digits: list[int], ensemble_prob_big: float = 0.5) -> dict:
@@ -392,11 +452,14 @@ class EnsemblePredictor:
             recency_probs /= recency_probs.sum()
 
         # --- Combine all signals ---
-        # Base combined signals (frequency, markov, recency)
+        # Markov weight reduced (was 0.40) — it over-locks onto one digit per Markov
+        # state, causing always-7 / always-1.  A 0.20 uniform floor ensures every
+        # correct-side digit has baseline probability.
         base_combined = (
-            0.40 * adjusted_freq +
-            0.40 * markov_probs +
-            0.20 * recency_probs
+            0.30 * adjusted_freq +
+            0.20 * markov_probs +
+            0.30 * recency_probs +
+            0.20 * (np.ones(10) / 10.0)
         )
         
         # --- The Hard Mask ---
@@ -407,14 +470,34 @@ class EnsemblePredictor:
         
         for i in range(10):
             if is_ensemble_big and i < 5:
-                masked_combined[i] *= 0.0001  # Banish Small digits if AI predicts Big
+                masked_combined[i] *= 0.25  # suppress wrong side (was 0.02 — too aggressive)
             elif not is_ensemble_big and i >= 5:
-                masked_combined[i] *= 0.0001  # Banish Big digits if AI predicts Small
+                masked_combined[i] *= 0.25  # suppress wrong side
                 
         # Normalize the final masked probabilities
         combined = masked_combined / masked_combined.sum()
 
+        # --- Digit diversity penalty ---
+        # If the same digit has been predicted 2+ times in the last 4 rounds,
+        # halve its probability so predictions rotate across the correct side.
+        if len(self._last_digit_predictions) >= 2:
+            recent_preds = list(self._last_digit_predictions)[-4:]
+            for d in set(recent_preds):
+                repeat_count = recent_preds.count(d)
+                if repeat_count >= 2:
+                    combined[d] *= max(0.25, 1.0 - 0.25 * repeat_count)
+            combined = combined / combined.sum()
+
         top_digit = int(np.argmax(combined))
+
+        # Post-hoc constraint: guarantee top_digit is always on the correct side.
+        # The diversity penalty can temporarily depress the correct side enough for
+        # a wrong-side digit to win argmax — clamp it back to the best correct-side digit.
+        correct_range = list(range(5, 10)) if is_ensemble_big else list(range(0, 5))
+        if top_digit not in correct_range:
+            top_digit = max(correct_range, key=lambda d: combined[d])
+
+        self._last_digit_predictions.append(top_digit)
         top_prob = float(combined[top_digit])
         
         # Confidence: how much better is the top digit vs uniform (10%)
@@ -491,28 +574,66 @@ class EnsemblePredictor:
             },
         }
 
-    def record_outcome(self, predicted: str, actual: str):
-        """Record prediction outcome for weight adjustment."""
-        # This is called after we know the actual result
-        # We'd need to track per-model predictions, but for simplicity
-        # we adjust weights based on ensemble performance
-        pass
+    def record_outcome(self, actual_label: str):
+        """Record prediction outcome for streak tracking and weight adjustment.
+        Call this after the actual result is known."""
+        if not self._pending_prediction:
+            return
 
-    def update_weights(self):
-        """Auto-adjust ensemble weights based on recent accuracy."""
-        total_all = sum(self.model_total.values())
-        if total_all < 50:
-            return  # need more data
+        actual_is_big = actual_label == "big"
+        ensemble_correct = self._pending_prediction["ensemble_big"] == actual_is_big
 
+        # Track per-model accuracy
+        model_results = {}
+        for name, pred_big in self._pending_prediction["models"].items():
+            is_correct = pred_big == actual_is_big
+            model_results[name] = is_correct
+            self.model_total[name] = self.model_total.get(name, 0) + 1
+            if is_correct:
+                self.model_correct[name] = self.model_correct.get(name, 0) + 1
+
+        # Track ensemble outcome for streak detection
+        self.recent_outcomes.append({
+            "ensemble": ensemble_correct,
+            "models": model_results
+        })
+
+        self._pending_prediction = None
+
+        # Live weight rebalancing every 5 outcomes once we have 10+
+        if len(self.recent_outcomes) >= 10 and len(self.recent_outcomes) % 5 == 0:
+            self._update_weights_live()
+
+    def _get_loss_streak(self) -> int:
+        """Get current consecutive loss count from recent outcomes."""
+        streak = 0
+        for outcome in reversed(self.recent_outcomes):
+            if not outcome["ensemble"]:
+                streak += 1
+            else:
+                break
+        return streak
+
+    def _update_weights_live(self):
+        """Rebalance ensemble weights based on recent per-model accuracy."""
+        if len(self.recent_outcomes) < 10:
+            return
+
+        # Use last 20 outcomes (or all available)
+        window = list(self.recent_outcomes)[-20:]
+
+        new_weights = {}
         for model_name in self.weights:
-            if self.model_total[model_name] > 0:
-                acc = self.model_correct[model_name] / self.model_total[model_name]
-                # Weight proportional to accuracy above chance
-                self.weights[model_name] = max(0.05, acc - 0.3)
+            correct_count = sum(1 for o in window if o["models"].get(model_name, False))
+            total = len(window)
+            acc = correct_count / total if total > 0 else 0.5
+            # Weight = accuracy above chance (50%), with minimum floor
+            new_weights[model_name] = max(0.05, acc - 0.3)
 
-        # Normalize
-        total = sum(self.weights.values())
-        self.weights = {k: v / total for k, v in self.weights.items()}
+        # Normalize weights to sum to 1
+        total_w = sum(new_weights.values())
+        if total_w > 0:
+            self.weights = {k: round(v / total_w, 4) for k, v in new_weights.items()}
 
     def _save_model(self):
         """Save model checkpoint."""
@@ -525,6 +646,8 @@ class EnsemblePredictor:
             "ensemble_weights": self.weights,
             "model_correct": self.model_correct,
             "model_total": self.model_total,
+            "recent_outcomes": list(self.recent_outcomes),
+            "last_digit_predictions": list(self._last_digit_predictions),
             "timestamp": time.time()
         }, path)
         print(f"[MODEL] Saved to {path}")

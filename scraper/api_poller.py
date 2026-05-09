@@ -27,9 +27,9 @@ API_ENDPOINTS = {
 
 # How often to poll each timer (seconds)
 POLL_INTERVALS = {
-    "30sec": 8,    # poll every 8s for 30sec timer
-    "1min":  15,   # poll every 15s for 1min timer
-    "3min":  30,   # poll every 30s for 3min timer
+    "30sec": 4,    # poll every 4s for 30sec timer
+    "1min":  5,    # poll every 5s for 1min timer
+    "3min":  10,   # poll every 10s for 3min timer
 }
 
 # Color mapping from API
