@@ -10,6 +10,7 @@ import time
 import json
 import hashlib
 import secrets
+import datetime
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -30,6 +31,7 @@ from model.predictor import EnsemblePredictor
 from config import (
     SEQUENCE_LENGTH, HOST, PORT,
     TORCH_THREADS, STARTUP_EPOCHS, CONTINUOUS_EPOCHS, CONTINUOUS_INTERVAL,
+    ONLINE_UPDATE_EVERY, CONTINUOUS_RETRAIN_WINDOW,
 )
 from scraper.api_poller import WinGoPoller
 
@@ -49,6 +51,9 @@ poller_status = {"active": False, "captured": {}}
 _adv_stats_cache: dict[str, dict] = {}
 _adv_stats_ts: dict[str, float] = {}
 ADV_STATS_TTL = 60  # seconds
+
+# Online-update throttle: count results per timer, only backprop every N
+_result_counter: dict[str, int] = {t: 0 for t in ["30sec", "1min", "3min"]}
 
 # --- Auth ---
 AUTH_USERNAME = os.getenv("DASHBOARD_USER", "Bibekjyoti")
@@ -90,12 +95,14 @@ async def on_api_result(digit: int, round_id: str, color: str, timer: str):
     if timer in predictors:
         predictors[timer].record_outcome(result["label"])
 
-    # Online model update for this timer only
+    # Online model update — throttled to every ONLINE_UPDATE_EVERY results per timer
+    # to avoid constant LSTM backprop on weak VPS hardware (e2-micro / 1 vCPU).
+    _result_counter[timer] = _result_counter.get(timer, 0) + 1
     results = await get_all_results_ordered(timer=timer)
     digits = [r["digit"] for r in results]
     timestamps = [r["timestamp"] for r in results]
 
-    if timer in predictors:
+    if timer in predictors and _result_counter[timer] % ONLINE_UPDATE_EVERY == 0:
         asyncio.create_task(_run_train(
             lambda d=digits, ts=timestamps, t=timer:
                 predictors[t].online_update(d, timestamps=ts)
@@ -262,6 +269,12 @@ async def continuous_trainer():
                     results = await get_all_results_ordered(timer=timer)
                     digits     = [r["digit"]     for r in results]
                     timestamps = [r["timestamp"] for r in results]
+                    # Cap to per-timer recent window — prevents CPU starvation.
+                    # 30sec generates ~120 results/hr so gets a larger window.
+                    window = CONTINUOUS_RETRAIN_WINDOW.get(timer, 1500)
+                    if window > 0:
+                        digits     = digits[-window:]
+                        timestamps = timestamps[-window:]
                     result = await _run_train(
                         lambda d=digits, ts=timestamps, t=timer:
                             predictors[t].train_bulk(d, epochs=CONTINUOUS_EPOCHS, lr=0.0005, timestamps=ts)
@@ -291,6 +304,25 @@ async def make_prediction_after_result(timer: str, digits: list[int], timestamps
     pred = predictors[timer].predict(digits, timestamps=timestamps)
     pred["timer"] = timer
     pred["for_round"] = next_round_id  # the round this prediction is FOR
+
+    # --- Golden-hours overlay ---
+    # If the current IST hour is not historically safe for this timer,
+    # force should_skip regardless of the model's own streak/regime assessment.
+    # Uses the cached advanced-stats (60 s TTL) — zero extra DB load.
+    try:
+        adv = await get_cached_advanced_stats(timer, tz_offset=-330)
+        raw = adv.get("safest_hours_raw", {})
+        src = raw.get("month", [])
+        if len(src) < 3:
+            src = raw.get("week", [])
+        golden_set = {h["hour"] for h in src[:8]}
+        ist_hour = (datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)).hour
+        if len(golden_set) >= 4 and ist_hour not in golden_set:
+            pred["should_skip"] = True
+            pred["golden_hour_skip"] = True
+    except Exception:
+        pass  # fail open — never block a prediction due to stats unavailability
+
     latest_predictions[timer] = pred
 
     # Store prediction with number and color
@@ -346,12 +378,13 @@ async def submit_result(result_input: ResultInput):
     if timer in predictors:
         predictors[timer].record_outcome(result["label"])
 
-    # Online model update for this timer only
+    # Online model update — same throttle as the API poller path
+    _result_counter[timer] = _result_counter.get(timer, 0) + 1
     results = await get_all_results_ordered(timer=timer)
     digits = [r["digit"] for r in results]
     timestamps = [r["timestamp"] for r in results]
 
-    if timer in predictors:
+    if timer in predictors and _result_counter[timer] % ONLINE_UPDATE_EVERY == 0:
         asyncio.create_task(_run_train(
             lambda d=digits, ts=timestamps, t=timer:
                 predictors[t].online_update(d, timestamps=ts)

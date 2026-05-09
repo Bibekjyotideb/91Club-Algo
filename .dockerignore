@@ -2,11 +2,23 @@
 __pycache__
 *.pyc
 *.pyo
-data/predictions.db
-data/page_dump.html
-data/scraper_ready.flag
+*.db
+*.db-wal
+*.db-shm
+Oracle keys/
+*.key
+*.pem
 model/checkpoints/*.pt
 .env
 *.bat
+Reverse/
+generate_simulated_db.py
+find_equation.py
+test_formula.py
+test_ml_local.py
+backtester.py
+calc_bet.py
+data/page_dump.html
+data/scraper_ready.flag
 scraper/run_scraper.py
 scraper/analyze_html.py

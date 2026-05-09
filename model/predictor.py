@@ -171,6 +171,11 @@ class EnsemblePredictor:
                 epoch_loss += loss.item()
                 num_batches += 1
 
+                # Yield CPU time every 10 batches so the event loop / WebSocket
+                # handler keeps responding on a 1-vCPU VPS.
+                if num_batches % 10 == 0:
+                    time.sleep(0.001)
+
             avg_loss = epoch_loss / max(num_batches, 1)
             train_losses.append(avg_loss)
 
@@ -346,21 +351,32 @@ class EnsemblePredictor:
         prob_big_from_num = float(sum(probs[5:10]))  # used for probability display bars
 
         # ===== CONFIDENCE GATING =====
-        # Backtests on 8900+ rounds confirm all sub-models sit within ±2pp of 50%
-        # → ensemble-distance and model-agreement are pure noise on random data.
-        # Using them to gate "HIGH" confidence was actively harmful (backtest showed
-        # HIGH-conf rounds at 45.8% — worse than flipping a coin).
+        # Backtests confirm all sub-models sit within ±2pp of 50% on random data.
+        # Two independent skip signals (either alone triggers skip):
         #
-        # Real risk control: only skip on loss streaks ≥ 4 (bankroll protection).
-        # Model-agreement is still computed for informational display bars.
+        #   1. Loss streak ≥ 3  — 3+ consecutive wrong predictions in a row.
+        #      Caps the Martingale exposure at 2 active levels before pausing.
+        #
+        #   2. Cold-regime detector — rolling 10-round accuracy < 40%.
+        #      Catches dispersed bad patches (e.g. 4 wrong in 10 rounds) that
+        #      are not caught by the streak gate alone.
+        #
+        # Model-agreement is still computed for informational display bars only.
         ensemble_big = ensemble_prob >= 0.5
         agree_count = sum(
             1 for p in model_predictions.values()
             if (p["prob_big"] >= 0.5) == ensemble_big
         )
-        # Always "HIGH" unless on a damaging loss streak
-        confidence_level = "HIGH" if loss_streak < 4 else "LOW"
-        should_skip = loss_streak >= 4
+
+        cold_regime = False
+        rolling_acc = None
+        if len(self.recent_outcomes) >= 10:
+            recent_10 = list(self.recent_outcomes)[-10:]
+            rolling_acc = sum(1 for o in recent_10 if o["ensemble"]) / len(recent_10)
+            cold_regime = rolling_acc < 0.40
+
+        confidence_level = "HIGH" if (loss_streak < 3 and not cold_regime) else "LOW"
+        should_skip = loss_streak >= 3 or cold_regime
 
         # ===== DERIVE COLOR deterministically from the predicted number =====
         # Even (incl 0) = Red, Odd = Green, 0 & 5 = also Violet
@@ -376,6 +392,8 @@ class EnsemblePredictor:
             "confidence_level": confidence_level,
             "loss_streak": loss_streak,
             "should_skip": should_skip,
+            "cold_regime": cold_regime,
+            "rolling_acc": round(rolling_acc, 3) if rolling_acc is not None else None,
             "flipped": False,
             "model_agreement": agree_count,
         }

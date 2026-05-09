@@ -359,8 +359,17 @@
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2"><circle cx="12" cy="8" r="7"></circle><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88"></polyline></svg>
                         <h3 style="color: #f59e0b; font-size: 1.1rem; text-shadow: 0 0 10px rgba(245, 158, 11, 0.3);">Golden Trading Hours</h3>
                     </div>
-                    <p class="best-times-desc" style="color:rgba(255,255,255,0.6); margin-bottom:15px;">Optimal intersection: Highest Accuracy (55%+) & Lowest Risk</p>
-                    
+                    <p class="best-times-desc" style="color:rgba(255,255,255,0.6); margin-bottom:12px;">Optimal intersection: Highest Accuracy (55%+) & Lowest Risk</p>
+
+                    <!-- Today So Far -->
+                    <div style="background:rgba(6,182,212,0.05);border:1px solid rgba(6,182,212,0.18);border-radius:8px;padding:10px 12px;margin-bottom:14px;">
+                        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+                            <span style="width:7px;height:7px;border-radius:50%;background:#22d3ee;display:inline-block;box-shadow:0 0 6px #22d3ee;"></span>
+                            <span style="color:#67e8f9;font-size:0.78rem;font-weight:600;letter-spacing:0.04em;">TODAY SO FAR</span>
+                        </div>
+                        <div id="optimalTimesToday" style="width:100%;">Calculating...</div>
+                    </div>
+
                     <div class="best-time-row" style="flex-direction: column; align-items: flex-start; gap:5px; margin-bottom: 20px;">
                         <span class="time-label" style="color:#fcd34d;">This Week:</span>
                         <div id="optimalTimesWeek" style="width:100%;">Calculating...</div>

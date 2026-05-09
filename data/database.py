@@ -496,37 +496,44 @@ async def get_advanced_stats(timer: str = None, tz_offset_minutes: int = -330) -
         if not valid_hours:
             return "Not enough data"
             
-        # Filter for >= 55% accuracy
-        golden_hours = [x for x in valid_hours if x["acc"] >= 55.0]
-        
-        if golden_hours:
-            # Sort by lowest max_loss, then highest accuracy
-            golden_hours.sort(key=lambda x: (x["max_loss"], -x["acc"]))
-            best_3 = golden_hours[:3]
-        else:
-            # Fallback: Just sort valid hours by lowest max loss, then highest accuracy
-            valid_hours.sort(key=lambda x: (x["max_loss"], -x["acc"]))
-            best_3 = valid_hours[:3]
-            
+        # Always show top 3 sorted by lowest max_loss then highest accuracy.
+        # Hours with acc >= 55% get a gold border ("true golden"),
+        # others get a muted border ("best available").
+        valid_hours.sort(key=lambda x: (x["max_loss"], -x["acc"]))
+        best_3 = valid_hours[:3]
+
         # Sort chronologically for display
         best_3.sort(key=lambda x: x["hour"])
-        
+
         def format_hr(h):
             h = h % 24
             ampm = "PM" if h >= 12 else "AM"
             h12 = h % 12
             if h12 == 0: h12 = 12
             return f"{h12}{ampm}"
-            
+
         formatted = []
         for item in best_3:
             h = item["hour"]
             ml = item["max_loss"]
             acc = item["acc"]
-            formatted.append(f"{format_hr(h)}-{format_hr(h+1)} <br><span style='color:#10b981;font-size:0.8rem;'>WR: {acc}%</span> | <span style='color:#ef4444;font-size:0.8rem;'>L: {ml}</span>")
-            
-        # We join with a div layout or just commas if they are inline blocks
-        return "<div style='display:flex; gap:10px; margin-top:5px; flex-wrap:wrap;'>" + "".join([f"<div style='background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; border:1px solid rgba(245, 158, 11, 0.2); font-size:0.85rem; text-align:center;'>{x}</div>" for x in formatted]) + "</div>"
+            is_golden = acc >= 55.0
+            border = "rgba(245,158,11,0.6)" if is_golden else "rgba(255,255,255,0.1)"
+            label = "<span style='font-size:0.65rem;color:#f59e0b;'>&#9733; GOLDEN</span><br>" if is_golden else ""
+            formatted.append(
+                f"{label}{format_hr(h)}-{format_hr(h+1)} "
+                f"<br><span style='color:#10b981;font-size:0.8rem;'>WR: {acc}%</span> "
+                f"| <span style='color:#ef4444;font-size:0.8rem;'>L: {ml}</span>"
+            )
+
+        return ("<div style='display:flex; gap:10px; margin-top:5px; flex-wrap:wrap;'>" +
+                "".join([
+                    f"<div style='background:rgba(255,255,255,0.05); padding:8px; border-radius:6px; "
+                    f"border:1px solid {('rgba(245,158,11,0.6)' if item['acc']>=55 else 'rgba(255,255,255,0.1)')}; "
+                    f"font-size:0.85rem; text-align:center;'>{x}</div>"
+                    for x, item in zip(formatted, best_3)
+                ]) +
+                "</div>")
 
     def calc_golden_hours_raw(bucket_rows, min_sample=15):
         """Return every hour (with enough data) sorted by lowest max_loss streak,
@@ -562,6 +569,56 @@ async def get_advanced_stats(timer: str = None, tz_offset_minutes: int = -330) -
         result.sort(key=lambda x: (x["max_loss"], -x["acc"]))
         return result
 
+    def calc_today_optimal(bucket_rows, min_sample=5):
+        """Today's best hours with a lower sample threshold — for live tracking."""
+        hour_stats = {h: {"max_loss": 0, "current_loss": 0, "wins": 0, "total": 0} for h in range(24)}
+        for r in bucket_rows:
+            c, ts = r
+            if c is None: continue
+            hr = to_local_hour(ts)
+            hour_stats[hr]["total"] += 1
+            if c == 1:
+                hour_stats[hr]["wins"] += 1
+                hour_stats[hr]["current_loss"] = 0
+            elif c == 0:
+                hour_stats[hr]["current_loss"] += 1
+                if hour_stats[hr]["current_loss"] > hour_stats[hr]["max_loss"]:
+                    hour_stats[hr]["max_loss"] = hour_stats[hr]["current_loss"]
+
+        valid_hours = []
+        for h, s in hour_stats.items():
+            if s["total"] >= min_sample:
+                acc = round((s["wins"] / s["total"]) * 100, 1)
+                valid_hours.append({"hour": h, "max_loss": s["max_loss"], "acc": acc, "total": s["total"]})
+
+        if not valid_hours:
+            return "<span style='color:rgba(255,255,255,0.35);font-size:0.8rem;'>Not enough rounds today yet</span>"
+
+        valid_hours.sort(key=lambda x: (x["max_loss"], -x["acc"]))
+        best_3 = valid_hours[:3]
+        best_3.sort(key=lambda x: x["hour"])
+
+        def format_hr(h):
+            h = h % 24
+            ampm = "PM" if h >= 12 else "AM"
+            h12 = h % 12
+            if h12 == 0: h12 = 12
+            return f"{h12}{ampm}"
+
+        cards = []
+        for item in best_3:
+            h, ml, acc, n = item["hour"], item["max_loss"], item["acc"], item["total"]
+            glow = "0.55" if acc >= 52.0 else "0.2"
+            cards.append(
+                f"<div style='background:rgba(6,182,212,0.07);padding:7px 10px;border-radius:6px;"
+                f"border:1px solid rgba(6,182,212,{glow});font-size:0.82rem;text-align:center;'>"
+                f"{format_hr(h)}-{format_hr(h+1)}"
+                f"<br><span style='color:#10b981;font-size:0.78rem;'>WR: {acc}%</span>"
+                f" | <span style='color:#ef4444;font-size:0.78rem;'>L:{ml}</span>"
+                f"<br><span style='color:rgba(255,255,255,0.35);font-size:0.7rem;'>{n} rounds</span></div>"
+            )
+        return "<div style='display:flex;gap:8px;margin-top:5px;flex-wrap:wrap;'>" + "".join(cards) + "</div>"
+
     trend_data = []
     # Sort properly by taking the latest 10 days
     sorted_dates = sorted(daily_accuracy.keys())[-10:]
@@ -585,6 +642,7 @@ async def get_advanced_stats(timer: str = None, tz_offset_minutes: int = -330) -
             "month": calc_safest_times(buckets["month"]["rows"])
         },
         "optimal_times": {
+            "today": calc_today_optimal(buckets["today"]["rows"]),
             "week": calc_optimal_times(buckets["week"]["rows"]),
             "month": calc_optimal_times(buckets["month"]["rows"])
         },

@@ -388,7 +388,7 @@ async function fetchPredictionHistory() {
 // ============ ADVANCED STATS ============
 async function fetchAdvancedStats(timer) {
     try {
-        const offset = new Date().getTimezoneOffset() * -1;
+        const offset = new Date().getTimezoneOffset(); // negative for UTC+ zones (e.g. IST = -330)
         const resp = await fetch(`/api/advanced_stats?timer=${timer}&tz_offset=${offset}`);
         const data = await resp.json();
         renderAdvancedStatsFromWS(data);
@@ -476,8 +476,10 @@ function renderAdvancedStatsFromWS(data) {
     }
 
     // Render Golden Times
+    const oToday = data.optimal_times?.today || 'No data yet today';
     const oWeek = data.optimal_times?.week || 'No optimal hours detected';
     const oMonth = data.optimal_times?.month || 'No optimal hours detected';
+    $('#optimalTimesToday').innerHTML = oToday;
     $('#optimalTimesWeek').innerHTML = oWeek;
     $('#optimalTimesMonth').innerHTML = oMonth;
 
@@ -947,6 +949,7 @@ let paperTrader = {
     balance: 0,
     lastProcessedRound: null,
     currentBetLevel: -1, // -1 means waiting
+    pendingBet: false,   // true only when a bet was actually placed last round
     waitStreakTarget: 0,
     maxLevels: 0,
     multiplier: 2.08,
@@ -980,6 +983,7 @@ function togglePaperTrade() {
     
     paperTrader.progression = calculateMartingaleProgression(paperTrader.baseBet, paperTrader.maxLevels, paperTrader.multiplier);
     paperTrader.currentBetLevel = -1; // Waiting
+    paperTrader.pendingBet = false;
     paperTrader.lastProcessedRound = null;
     
     $('#paperStatusBadge').textContent = 'RUNNING';
@@ -1022,7 +1026,8 @@ function processPaperTrade(historyArray) {
     
     if (latest.round_id === paperTrader.lastProcessedRound) return; // No new data
     
-    if (paperTrader.currentBetLevel !== -1) {
+    // ── 1. Evaluate PREVIOUS round's result (only if we actually placed a bet) ──
+    if (paperTrader.currentBetLevel !== -1 && paperTrader.pendingBet) {
         const betAmount = paperTrader.progression[paperTrader.currentBetLevel].bet;
         
         if (latest.correct === 1) {
@@ -1033,20 +1038,22 @@ function processPaperTrade(historyArray) {
         } else {
             logPaperTrade(`LOST Level ${paperTrader.currentBetLevel + 1}.`, "#ef4444");
             paperTrader.currentBetLevel++;
-            
             if (paperTrader.currentBetLevel >= paperTrader.maxLevels) {
                 logPaperTrade(`CRITICAL: Max Levels Exceeded. Sequence Wiped.`, "#ef4444");
-                paperTrader.currentBetLevel = -1; // Wait for win to reset
+                paperTrader.currentBetLevel = -1;
             }
         }
+        paperTrader.pendingBet = false;
     }
     
+    // ── 2. Calculate current AI loss streak ──────────────────────────────────────
     let newStreak = 0;
     for (let i = 0; i < resolved.length; i++) {
         if (resolved[i].correct === 0) newStreak++;
         else break;
     }
     
+    // ── 3. Determine entry level ──────────────────────────────────────────────────
     if (paperTrader.currentBetLevel === -1) {
         if (newStreak >= paperTrader.waitStreakTarget && paperTrader.waitStreakTarget >= 0) {
             paperTrader.currentBetLevel = newStreak - paperTrader.waitStreakTarget; 
@@ -1056,8 +1063,31 @@ function processPaperTrade(historyArray) {
         }
     }
     
+    // ── 4. Decide whether to place a bet for the NEXT round ──────────────────────
     if (paperTrader.currentBetLevel !== -1) {
-        // ── Golden Hours gate ──────────────────────────────────────────────
+
+        // ── AI skip gate (server-side: streak / cold-regime / golden-hours) ────
+        const meta = latestPredictionMeta;
+        if (meta && meta.timer === activeTimer && meta.should_skip) {
+            const fmt = h => `${h % 12 || 12}${h >= 12 ? 'PM' : 'AM'}`;
+            let reason;
+            if (meta.golden_hour_skip) {
+                const h = new Date().getHours();
+                reason = `${fmt(h)} not a golden hour`;
+            } else if (meta.cold_regime) {
+                const acc = meta.rolling_acc != null ? ` (${(meta.rolling_acc*100).toFixed(0)}% last 10)` : '';
+                reason = `cold streak${acc}`;
+            } else {
+                reason = `loss streak (${meta.loss_streak ?? newStreak})`;
+            }
+            logPaperTrade(`⏸ PAUSED L${paperTrader.currentBetLevel + 1}: AI skip — ${reason}`, "#f59e0b");
+            paperTrader.pendingBet = false;
+            paperTrader.lastProcessedRound = latest.round_id;
+            updatePaperUI();
+            return;
+        }
+
+        // ── Client-side golden hours filter (toggle in UI) ────────────────────
         if (goldenHoursOnly) {
             const currentHour = new Date().getHours();
             const src = goldenHoursRaw.month.length >= 3
@@ -1066,16 +1096,17 @@ function processPaperTrade(historyArray) {
             if (safeHours.length > 0 && !safeHours.includes(currentHour)) {
                 const fmt = h => `${h % 12 || 12}${h >= 12 ? 'PM' : 'AM'}`;
                 logPaperTrade(
-                    `SKIPPED (${fmt(currentHour)} not a golden hour — max loss too high)`,
+                    `⏸ PAUSED (${fmt(currentHour)} not a golden hour — UI filter)`,
                     "#f59e0b"
                 );
+                paperTrader.pendingBet = false;
                 paperTrader.lastProcessedRound = latest.round_id;
                 updatePaperUI();
                 return;
             }
         }
-        // ─────────────────────────────────────────────────────────────────
 
+        // ── Place the bet ─────────────────────────────────────────────────────
         const nextBet = paperTrader.progression[paperTrader.currentBetLevel].bet;
         if (paperTrader.balance < nextBet) {
             logPaperTrade(`BANKRUPT! Insufficient funds for Level ${paperTrader.currentBetLevel + 1} (₹${nextBet}).`, "#ef4444");
@@ -1083,12 +1114,8 @@ function processPaperTrade(historyArray) {
             return;
         }
         paperTrader.balance -= nextBet;
-        let betNote = '';
-        if (latestPredictionMeta && latestPredictionMeta.timer === activeTimer) {
-            if (latestPredictionMeta.flipped)    betNote = ' 🔄 direction flipped';
-            else if (latestPredictionMeta.should_skip) betNote = ' \u26a0 AI flagged SKIP';
-        }
-        logPaperTrade(`PLACED Level ${paperTrader.currentBetLevel + 1} Bet: -\u20b9${nextBet.toLocaleString()}${betNote}`, "#60a5fa");
+        logPaperTrade(`PLACED Level ${paperTrader.currentBetLevel + 1} Bet: -\u20b9${nextBet.toLocaleString()}`, "#60a5fa");
+        paperTrader.pendingBet = true;
     }
     
     paperTrader.lastProcessedRound = latest.round_id;

@@ -39,6 +39,20 @@ STARTUP_EPOCHS   = int(os.getenv("STARTUP_EPOCHS",   "3"))
 # Epochs and interval for the background continuous trainer.
 CONTINUOUS_EPOCHS    = int(os.getenv("CONTINUOUS_EPOCHS",    "5"))
 CONTINUOUS_INTERVAL  = int(os.getenv("CONTINUOUS_INTERVAL",  "3600"))  # seconds (default 60 min)
+# Per-timer continuous retrain window (most recent N rows, 0 = all data).
+# Prevents 1-2 min CPU starvation on 1-vCPU VPS from training on full history.
+# 30sec generates ~120 results/hr so needs a larger window than 1min/3min.
+# VPS recommended: 30sec=2000, 1min=1000, 3min=500
+CONTINUOUS_RETRAIN_WINDOW = {
+    "30sec": int(os.getenv("RETRAIN_WINDOW_30SEC", "3000")),  # ~25 hrs at 120/hr
+    "1min":  int(os.getenv("RETRAIN_WINDOW_1MIN",  "1500")),  # ~25 hrs at 60/hr
+    "3min":  int(os.getenv("RETRAIN_WINDOW_3MIN",  "1000")),  # ~50 hrs at 20/hr
+}
+# Online update throttle: LSTM backprop every N new results per timer.
+# NOTE: predictions fire on EVERY result regardless — this only controls
+# how often the background weight-adjustment (backprop) runs.
+# 5 = every 2.5 min for 30sec, every 5 min for 1min. Fine for all VPS.
+ONLINE_UPDATE_EVERY  = int(os.getenv("ONLINE_UPDATE_EVERY",  "5"))
 
 # --- Prediction ---
 CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.55"))
@@ -58,9 +72,9 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 # --- API Poller (replaces Selenium scraper) ---
 API_BASE_URL = "https://draw.ar-lottery01.com"
 API_POLL_INTERVALS = {
-    "30sec": 8,   # seconds between polls
-    "1min": 15,
-    "3min": 30,
+    "30sec": 4,   # seconds between polls
+    "1min":  5,
+    "3min":  10,
 }
 API_BACKFILL_ON_START = True  # fetch initial batch of results on startup
 
